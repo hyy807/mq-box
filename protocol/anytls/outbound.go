@@ -13,6 +13,7 @@ import (
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
+	"github.com/sagernet/sing-box/transport/lightxtreme"
 	"github.com/sagernet/sing/common"
 	E "github.com/sagernet/sing/common/exceptions"
 	M "github.com/sagernet/sing/common/metadata"
@@ -22,6 +23,12 @@ import (
 
 func RegisterOutbound(registry *outbound.Registry) {
 	outbound.Register[option.AnyTLSOutboundOptions](registry, C.TypeAnyTLS, NewOutbound)
+	outbound.Register[option.AnyTLSOutboundOptions](registry, C.TypeLightXtremeAny, newPrivateOutbound)
+}
+
+func newPrivateOutbound(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.AnyTLSOutboundOptions) (adapter.Outbound, error) {
+	options.PrivateAuth = true
+	return NewOutbound(ctx, router, logger, tag, options)
 }
 
 var (
@@ -39,6 +46,7 @@ type Outbound struct {
 	client        *anytls.Client
 	uotClient     *uot.Client
 	logger        log.ContextLogger
+	privateAuth   *[32]byte
 }
 
 func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.AnyTLSOutboundOptions) (adapter.Outbound, error) {
@@ -80,6 +88,13 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 		MinIdleSession:           options.MinIdleSession,
 		Logger:                   logger,
 	}
+	if options.PlatformMarker != 0 && !options.PrivateAuth {
+		return nil, E.New("platform_marker requires private_auth or type any")
+	}
+	if options.PrivateAuth {
+		auth := lightxtreme.Auth(options.Password, options.PlatformMarker)
+		outbound.privateAuth = &auth
+	}
 	return outbound, nil
 }
 
@@ -111,7 +126,14 @@ func (d anytlsDialer) ListenPacket(ctx context.Context, destination M.Socksaddr)
 }
 
 func (h *Outbound) dialOut(ctx context.Context) (net.Conn, error) {
-	return h.dialer.DialTLSContext(adapter.ContextForMultiplexSession(ctx), h.server)
+	conn, err := h.dialer.DialTLSContext(adapter.ContextForMultiplexSession(ctx), h.server)
+	if err != nil {
+		return nil, err
+	}
+	if h.privateAuth != nil {
+		return lightxtreme.WrapAuth(conn, *h.privateAuth), nil
+	}
+	return conn, nil
 }
 
 func (h *Outbound) MultiplexEnabled() bool {

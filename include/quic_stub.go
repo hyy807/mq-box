@@ -54,6 +54,9 @@ func registerQUICOutbounds(registry *outbound.Registry) {
 	outbound.Register[option.HysteriaOutboundOptions](registry, C.TypeHysteria, func(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.HysteriaOutboundOptions) (adapter.Outbound, error) {
 		return nil, C.ErrQUICNotIncluded
 	})
+	outbound.Register[option.ShadowQUICOutboundOptions](registry, C.TypeShadowQUIC, func(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.ShadowQUICOutboundOptions) (adapter.Outbound, error) {
+		return nil, C.ErrQUICNotIncluded
+	})
 	outbound.Register[option.TUICOutboundOptions](registry, C.TypeTUIC, func(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.TUICOutboundOptions) (adapter.Outbound, error) {
 		return nil, C.ErrQUICNotIncluded
 	})

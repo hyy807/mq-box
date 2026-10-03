@@ -274,14 +274,20 @@ func (s *CommandServer) Wake() {
 	if recorder != nil {
 		recorder.RecordDeviceWake()
 	}
-	if !C.IsAndroid {
+	if !C.IsAndroid && !C.IsIos {
 		return
 	}
 	instance := s.StartedService.Instance()
-	if instance == nil || instance.PauseManager() == nil {
+	if instance == nil || instance.Box() == nil || instance.PauseManager() == nil {
 		return
 	}
 	instance.PauseManager().DeviceWake()
+	if C.IsIos {
+		// iOS may suspend and invalidate active sockets while the screen is
+		// locked. Wake must actively rebuild network transports; iOS does not
+		// enter the Android pause-manager path above.
+		instance.Box().Network().ResetNetwork(context.Background())
+	}
 }
 
 func (s *CommandServer) WakeNow() {

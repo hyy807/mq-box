@@ -13,6 +13,7 @@ const (
 	TypeMixed              = "mixed"
 	TypeShadowsocks        = "shadowsocks"
 	TypeSnell              = "snell"
+	TypeMieru              = "mieru"
 	TypeVMess              = "vmess"
 	TypeTrojan             = "trojan"
 	TypeNaive              = "naive"
@@ -22,9 +23,15 @@ const (
 	TypeSSH                = "ssh"
 	TypeShadowTLS          = "shadowtls"
 	TypeAnyTLS             = "anytls"
+	TypeLightXtremeAny     = "any"
+	TypeOppa               = "oppa"
+	TypeXhttp              = "xhttp"
+	TypeOneSocks           = "os"
+	TypeOneSocksLong       = "onesocks"
 	TypeShadowsocksR       = "shadowsocksr"
 	TypeVLESS              = "vless"
 	TypeTUIC               = "tuic"
+	TypeShadowQUIC         = "shadowquic"
 	TypeHysteria2          = "hysteria2"
 	TypeOpenConnect        = "openconnect"
 	TypeOpenVPNClient      = "openvpn-client"
@@ -79,6 +86,8 @@ func ProxyDisplayName(proxyType string) string {
 		return "Shadowsocks"
 	case TypeSnell:
 		return "Snell"
+	case TypeMieru:
+		return "Mieru"
 	case TypeVMess:
 		return "VMess"
 	case TypeTrojan:
@@ -101,9 +110,17 @@ func ProxyDisplayName(proxyType string) string {
 		return "VLESS"
 	case TypeTUIC:
 		return "TUIC"
+	case TypeShadowQUIC:
+		return "ShadowQUIC"
 	case TypeHysteria2:
 		return "Hysteria2"
-	case TypeAnyTLS:
+	case TypeOppa:
+		return "Oppa"
+	case TypeXhttp:
+		return "Heysocks XHTTP"
+	case TypeOneSocks, TypeOneSocksLong:
+		return "OneSocks"
+	case TypeAnyTLS, TypeLightXtremeAny:
 		return "AnyTLS"
 	case TypeOpenConnect:
 		return "OpenConnect"

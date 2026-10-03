@@ -99,6 +99,8 @@ func newRealityClient(ctx context.Context, logger logger.ContextLogger, serverAd
 	return config, nil
 }
 
+func (*RealityClientConfig) IsReality() bool { return true }
+
 func (e *RealityClientConfig) ServerName() string {
 	return e.uClient.ServerName()
 }
@@ -113,6 +115,12 @@ func (e *RealityClientConfig) NextProtos() []string {
 
 func (e *RealityClientConfig) SetNextProtos(nextProto []string) {
 	e.uClient.SetNextProtos(nextProto)
+}
+
+// SetNextProtosOnly is for transports which cannot accept an implicit
+// http/1.1 fallback, such as XHTTP's HTTP/2-only client.
+func (e *RealityClientConfig) SetNextProtosOnly(nextProto []string) {
+	e.uClient.config.NextProtos = append([]string(nil), nextProto...)
 }
 
 func (e *RealityClientConfig) HandshakeTimeout() time.Duration {
@@ -166,14 +174,24 @@ func (e *RealityClientConfig) ClientHandshake(ctx context.Context, conn net.Conn
 		for _, extension := range uConn.Extensions {
 			if alpnExtension, isALPN := extension.(*utls.ALPNExtension); isALPN {
 				alpnExtension.AlpnProtocols = uConfig.NextProtos
+				// Rebuild the serialized ClientHello before using it as REALITY
+				// AEAD associated data. Otherwise the actual wire ALPN differs
+				// from the bytes authenticated below.
+				err = uConn.BuildHandshakeState()
+				if err != nil {
+					return nil, err
+				}
 				break
 			}
 		}
 	}
 
 	hello := uConn.HandshakeState.Hello
+	// REALITY authenticates the ClientHello with the session ID bytes zeroed
+	// in the associated data. Keep the raw ClientHello in that state until
+	// after sealing, just like the matching mihomo REALITY client.
 	hello.SessionId = make([]byte, 32)
-	copy(hello.Raw[39:], hello.SessionId)
+	clear(hello.Raw[39 : 39+32])
 
 	var nowTime time.Time
 	if uConfig.Time != nil {
@@ -185,7 +203,7 @@ func (e *RealityClientConfig) ClientHandshake(ctx context.Context, conn net.Conn
 
 	hello.SessionId[0] = 1
 	hello.SessionId[1] = 8
-	hello.SessionId[2] = 1
+	hello.SessionId[2] = 2
 	binary.BigEndian.PutUint32(hello.SessionId[4:], uint32(time.Now().Unix()))
 	copy(hello.SessionId[8:], e.shortID[:])
 	if debug.Enabled {

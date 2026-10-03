@@ -553,8 +553,13 @@ func (r *NetworkManager) updateInterface(ctx context.Context, defaultInterface *
 			return it.Interface.Index == defaultInterface.Index
 		})
 		if networkInterface.Name == "" {
-			// race
-			return
+			// The platform interface snapshot has not caught up with the interface
+			// the platform just reported: the platform monitor snapshots its own
+			// path, which can still describe the previous network. Returning here
+			// skips the reset below and leaves every established connection bound
+			// to the previous network until the tunnel is restarted manually, so
+			// fall back to the reported interface and continue instead.
+			networkInterface = adapter.NetworkInterface{Interface: *defaultInterface}
 		}
 		options = append(options, F.ToString("type ", networkInterface.Type))
 		if networkInterface.Expensive {

@@ -107,6 +107,7 @@ func (o *InboundTLSOptionsContainer) ReplaceInboundTLSOptions(options *InboundTL
 
 type OutboundTLSOptions struct {
 	Enabled                    bool                            `json:"enabled,omitempty"`
+	JLS                        *OutboundJLSOptions             `json:"jls,omitempty"`
 	Engine                     string                          `json:"engine,omitempty" enum:"go,apple,windows"`
 	DisableSNI                 bool                            `json:"disable_sni,omitempty"`
 	ServerName                 string                          `json:"server_name,omitempty"`
@@ -135,6 +136,19 @@ type OutboundTLSOptions struct {
 	ECH                        *OutboundECHOptions             `json:"ech,omitempty"`
 	UTLS                       *OutboundUTLSOptions            `json:"utls,omitempty"`
 	Reality                    *OutboundRealityOptions         `json:"reality,omitempty"`
+	RESTLS                     *OutboundRESTLSOptions          `json:"restls,omitempty"`
+}
+
+type OutboundRESTLSOptions struct {
+	Password     string `json:"password,omitempty"`
+	VersionHint  string `json:"version_hint,omitempty"`
+	RESTLSScript string `json:"restls_script,omitempty"`
+	Fingerprint  string `json:"fingerprint,omitempty"`
+}
+
+type OutboundJLSOptions struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
 }
 
 type OutboundTLSOptionsContainer struct {

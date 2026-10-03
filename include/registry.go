@@ -26,8 +26,11 @@ import (
 	"github.com/sagernet/sing-box/protocol/group"
 	"github.com/sagernet/sing-box/protocol/http"
 	"github.com/sagernet/sing-box/protocol/masque"
+	"github.com/sagernet/sing-box/protocol/mieru"
 	"github.com/sagernet/sing-box/protocol/mixed"
 	"github.com/sagernet/sing-box/protocol/naive"
+	"github.com/sagernet/sing-box/protocol/onesocks"
+	"github.com/sagernet/sing-box/protocol/oppa"
 	"github.com/sagernet/sing-box/protocol/redirect"
 	"github.com/sagernet/sing-box/protocol/shadowsocks"
 	"github.com/sagernet/sing-box/protocol/shadowtls"
@@ -39,6 +42,7 @@ import (
 	"github.com/sagernet/sing-box/protocol/tun"
 	"github.com/sagernet/sing-box/protocol/vless"
 	"github.com/sagernet/sing-box/protocol/vmess"
+	"github.com/sagernet/sing-box/protocol/xhttp"
 	"github.com/sagernet/sing-box/service/api"
 	originca "github.com/sagernet/sing-box/service/origin_ca"
 	"github.com/sagernet/sing-box/service/resolved"
@@ -94,8 +98,12 @@ func OutboundRegistry() *outbound.Registry {
 	http.RegisterOutbound(registry)
 	shadowsocks.RegisterOutbound(registry)
 	snell.RegisterOutbound(registry)
+	mieru.RegisterOutbound(registry)
 	vmess.RegisterOutbound(registry)
 	trojan.RegisterOutbound(registry)
+	oppa.RegisterOutbound(registry)
+	xhttp.RegisterOutbound(registry)
+	onesocks.RegisterOutbound(registry)
 	registerNaiveOutbound(registry)
 	tor.RegisterOutbound(registry)
 	ssh.RegisterOutbound(registry)

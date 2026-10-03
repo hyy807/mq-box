@@ -1,6 +1,7 @@
 package libbox
 
 import (
+	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/service/powerreport"
 	tun "github.com/sagernet/sing-tun"
 	"github.com/sagernet/sing/common/control"
@@ -61,6 +62,23 @@ func (m *platformDefaultInterfaceMonitor) UpdateNetworkPath(networkPath string) 
 	if networkPath != m.lastNetworkPath {
 		m.lastNetworkPath = networkPath
 		m.logger.Debug("updated network path: ", networkPath)
+		if C.IsDarwin {
+			// The network path changes when the underlying network is replaced,
+			// even when the default interface keeps the same name and index (for
+			// example a Wi-Fi/cellular handover or a cellular re-attach). Report
+			// the current default interface so the router resets connections,
+			// instead of leaving them bound to the previous network until the
+			// tunnel is restarted manually.
+			m.defaultInterfaceAccess.Lock()
+			defaultInterface := m.defaultInterface
+			callbacks := m.callbacks.Array()
+			m.defaultInterfaceAccess.Unlock()
+			if defaultInterface != nil {
+				for _, callback := range callbacks {
+					callback(defaultInterface, 0)
+				}
+			}
+		}
 	}
 	if m.powerManager == nil {
 		return

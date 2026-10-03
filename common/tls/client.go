@@ -83,6 +83,9 @@ func NewClientWithOptions(options ClientOptions) (Config, error) {
 	if !options.Options.Enabled {
 		return nil, nil
 	}
+	if options.Options.JLS != nil {
+		return newJLSClient(options)
+	}
 	if !options.KTLSCompatible {
 		if options.Options.KernelTx {
 			options.Logger.Warn("enabling kTLS TX in current scenarios will definitely reduce performance, please checkout https://sing-box.sagernet.org/configuration/shared/tls/#kernel_tx")
@@ -90,6 +93,12 @@ func NewClientWithOptions(options ClientOptions) (Config, error) {
 	}
 	if options.Options.KernelRx {
 		options.Logger.Warn("enabling kTLS RX will definitely reduce performance, please checkout https://sing-box.sagernet.org/configuration/shared/tls/#kernel_rx")
+	}
+	if options.Options.RESTLS != nil {
+		if options.Options.Reality != nil && options.Options.Reality.Enabled {
+			return nil, E.New("RESTLS is incompatible with reality")
+		}
+		return newRESTLSClient(options.Context, options.ServerAddress, options.Options)
 	}
 	switch options.Options.Engine {
 	case "", C.TLSEngineGo:

@@ -370,6 +370,32 @@ func init() {
 
 func uTLSClientHelloID(name string) (utls.ClientHelloID, error) {
 	switch name {
+	case "chrome_106", "chrome106", "chrome_106_shuffle", "chrome_shuffle":
+		// The reference Heysocks kernel links sagernet/utls
+		// v0.0.0-20230309024959-6732c2ab36f2, where HelloChrome_Auto is
+		// HelloChrome_106_Shuffle (Chrome 106 with shuffled extensions).
+		// `chrome` alone is Chrome 133 in this fork, which the server rejects.
+		return utls.HelloChrome_106_Shuffle, nil
+	case "chrome_100":
+		return utls.HelloChrome_100, nil
+	case "chrome_102":
+		return utls.HelloChrome_102, nil
+	case "chrome_100_psk":
+		return utls.HelloChrome_100_PSK, nil
+	case "chrome_112_psk_shuffle":
+		return utls.HelloChrome_112_PSK_Shuf, nil
+	case "chrome_114_padding_psk_shuffle":
+		return utls.HelloChrome_114_Padding_PSK_Shuf, nil
+	case "chrome_115_pq":
+		return utls.HelloChrome_115_PQ, nil
+	case "chrome_120":
+		return utls.HelloChrome_120, nil
+	case "chrome_120_pq":
+		return utls.HelloChrome_120_PQ, nil
+	case "chrome_131":
+		return utls.HelloChrome_131, nil
+	case "chrome_133":
+		return utls.HelloChrome_133, nil
 	case "chrome_psk", "chrome_psk_shuffle", "chrome_padding_psk_shuffle", "chrome_pq", "chrome_pq_psk":
 		fallthrough
 	case "chrome", "":

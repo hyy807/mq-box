@@ -48,6 +48,7 @@ type URLTest struct {
 	idleTimeout                  time.Duration
 	group                        *URLTestGroup
 	checkAccess                  sync.Mutex
+	lastInterfaceUpdate          atomic.Int64
 	interruptExternalConnections bool
 }
 
@@ -142,6 +143,15 @@ func (s *URLTest) PerformUpdateCheck() {
 	s.group.performUpdateCheck()
 }
 
+// urlTestInterfaceUpdateInterval limits how often a network change may force a
+// full group re-check. The router resets the network both for real interface
+// changes and for unrelated reasons — the memory-pressure oom-killer calls
+// ReleaseMemory -> ResetNetwork on every threshold — and forcing a check of a
+// large group takes far longer than the reset interval. Without a cooldown each
+// reset queues another full re-check behind the running one, so sessions and
+// their teardown cost multiply without bound.
+const urlTestInterfaceUpdateInterval = 20 * time.Second
+
 func (s *URLTest) InterfaceUpdated(ctx context.Context) {
 	group := s.group
 	if group == nil {
@@ -156,6 +166,13 @@ func (s *URLTest) InterfaceUpdated(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
+		if lastUpdate := s.lastInterfaceUpdate.Load(); lastUpdate != 0 && time.Since(time.Unix(0, lastUpdate)) < urlTestInterfaceUpdateInterval {
+			return
+		}
+		s.lastInterfaceUpdate.Store(time.Now().UnixNano())
+		// A network change invalidates every established connection, so member
+		// health is unknown and the check must still ignore the regular
+		// interval.
 		group.CheckOutbounds(ctx, true)
 	}()
 }
@@ -407,7 +424,7 @@ type urlTestBatch struct {
 }
 
 func URLTestOutbounds(ctx context.Context, outboundManager adapter.OutboundManager, history *urltest.HistoryStorage, logger log.Logger, outbounds []adapter.Outbound, link string, interval time.Duration, force bool) map[string]uint16 {
-	b, _ := batch.New(ctx, batch.WithConcurrencyNum[any](10))
+	b, _ := batch.New(ctx, batch.WithConcurrencyNum[any](8))
 	testBatch := &urlTestBatch{
 		ctx:      ctx,
 		outbound: outboundManager,

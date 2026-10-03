@@ -739,17 +739,18 @@ func (s *StartedService) URLTest(ctx context.Context, request *URLTestRequest) (
 		}))
 		go group.URLTestOutbounds(boxService.ctx, boxService.outboundManager, historyStorage, boxService.logFactory.Logger(), outbounds, "", 0, true)
 	} else {
-		go func() {
-			t, err := urltest.URLTest(boxService.ctx, "", outbound)
-			if err != nil {
-				historyStorage.DeleteURLTestHistory(outboundTag)
-			} else {
-				historyStorage.StoreURLTestHistory(outboundTag, &adapter.URLTestHistory{
-					Time:  time.Now(),
-					Delay: t,
-				})
-			}
-		}()
+		// A single-node test must report its connection/handshake error to the
+		// caller instead of returning success while an unobserved goroutine
+		// deletes its delay history. The iOS URL-test button displays this error.
+		t, err := urltest.URLTest(ctx, "", outbound)
+		if err != nil {
+			historyStorage.DeleteURLTestHistory(outboundTag)
+			return nil, err
+		}
+		historyStorage.StoreURLTestHistory(outboundTag, &adapter.URLTestHistory{
+			Time:  time.Now(),
+			Delay: t,
+		})
 	}
 	return &emptypb.Empty{}, nil
 }

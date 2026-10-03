@@ -1,6 +1,7 @@
 package trojan
 
 import (
+	"crypto/md5"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
@@ -166,6 +167,16 @@ func (c *ClientPacketConn) FrontHeadroom() int {
 
 func (c *ClientPacketConn) Upstream() any {
 	return c.Conn
+}
+
+func DerivePassword(password string, mpw string) string {
+	if mpw == "" {
+		return password
+	}
+	digest := md5.Sum([]byte(password + mpw))
+	encoded := make([]byte, hex.EncodedLen(len(digest)))
+	hex.Encode(encoded, digest[:])
+	return string(encoded)
 }
 
 func Key(password string) [KeyLength]byte {

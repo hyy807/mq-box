@@ -19,6 +19,7 @@ type TrojanOutboundOptions struct {
 	DialerOptions
 	ServerOptions
 	Password string      `json:"password"`
+	Mpw      string      `json:"mpw,omitempty"`
 	Network  NetworkList `json:"network,omitempty"`
 	OutboundTLSOptionsContainer
 	Multiplex *OutboundMultiplexOptions `json:"multiplex,omitempty"`

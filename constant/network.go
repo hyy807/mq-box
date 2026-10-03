@@ -7,6 +7,10 @@ import (
 
 const UDPSocketBufferSize = 8 << 20
 
+// URLTestUnifiedDelay makes URL tests report the delay of a request sent on an
+// already established connection (sing-boxr compatibility).
+var URLTestUnifiedDelay = false
+
 type InterfaceType uint8
 
 const (
