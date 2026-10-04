@@ -19,6 +19,7 @@ import (
 	"github.com/sagernet/sing-box/dns/transport/mdns"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
+	"github.com/sagernet/sing-box/protocol/aha"
 	"github.com/sagernet/sing-box/protocol/anytls"
 	"github.com/sagernet/sing-box/protocol/block"
 	"github.com/sagernet/sing-box/protocol/bridge"
@@ -104,6 +105,7 @@ func OutboundRegistry() *outbound.Registry {
 	oppa.RegisterOutbound(registry)
 	xhttp.RegisterOutbound(registry)
 	onesocks.RegisterOutbound(registry)
+	aha.RegisterOutbound(registry)
 	registerNaiveOutbound(registry)
 	tor.RegisterOutbound(registry)
 	ssh.RegisterOutbound(registry)
@@ -121,6 +123,7 @@ func OutboundRegistry() *outbound.Registry {
 func EndpointRegistry() *endpoint.Registry {
 	registry := endpoint.NewRegistry()
 
+	aha.RegisterEndpoint(registry)
 	registerWireGuardEndpoint(registry)
 	registerOpenConnectEndpoint(registry)
 	registerOpenVPNEndpoints(registry)

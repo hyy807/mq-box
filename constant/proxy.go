@@ -25,6 +25,7 @@ const (
 	TypeAnyTLS             = "anytls"
 	TypeLightXtremeAny     = "any"
 	TypeOppa               = "oppa"
+	TypeAHA                = "aha"
 	TypeXhttp              = "xhttp"
 	TypeOneSocks           = "os"
 	TypeOneSocksLong       = "onesocks"
@@ -116,6 +117,8 @@ func ProxyDisplayName(proxyType string) string {
 		return "Hysteria2"
 	case TypeOppa:
 		return "Oppa"
+	case TypeAHA:
+		return "AHAspeed"
 	case TypeXhttp:
 		return "Heysocks XHTTP"
 	case TypeOneSocks, TypeOneSocksLong:
