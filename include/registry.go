@@ -26,6 +26,7 @@ import (
 	"github.com/sagernet/sing-box/protocol/direct"
 	"github.com/sagernet/sing-box/protocol/group"
 	"github.com/sagernet/sing-box/protocol/http"
+	"github.com/sagernet/sing-box/protocol/jumao"
 	"github.com/sagernet/sing-box/protocol/masque"
 	"github.com/sagernet/sing-box/protocol/mieru"
 	"github.com/sagernet/sing-box/protocol/mixed"
@@ -105,6 +106,7 @@ func OutboundRegistry() *outbound.Registry {
 	oppa.RegisterOutbound(registry)
 	xhttp.RegisterOutbound(registry)
 	onesocks.RegisterOutbound(registry)
+	jumao.RegisterOutbound(registry)
 	aha.RegisterOutbound(registry)
 	registerNaiveOutbound(registry)
 	tor.RegisterOutbound(registry)

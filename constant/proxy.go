@@ -29,6 +29,7 @@ const (
 	TypeXhttp              = "xhttp"
 	TypeOneSocks           = "os"
 	TypeOneSocksLong       = "onesocks"
+	TypeJumao              = "jumao"
 	TypeShadowsocksR       = "shadowsocksr"
 	TypeVLESS              = "vless"
 	TypeTUIC               = "tuic"
@@ -123,6 +124,8 @@ func ProxyDisplayName(proxyType string) string {
 		return "Heysocks XHTTP"
 	case TypeOneSocks, TypeOneSocksLong:
 		return "OneSocks"
+	case TypeJumao:
+		return "Jumao"
 	case TypeAnyTLS, TypeLightXtremeAny:
 		return "AnyTLS"
 	case TypeOpenConnect:
