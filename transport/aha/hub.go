@@ -199,22 +199,31 @@ func (h *HubDiscovery) DiscoverAll(ctx context.Context, username, password, regi
 				}
 				backend := field(node, "backend_host", "real_host", "backend_ip", "real_ip")
 				if backend == "" {
-					backend = BackendHost(host)
+					// The map key is the host to dial; the "host" field is only the
+					// camouflage identity used for TLS SNI and the HTTP Host header.
+					// Relay entries must keep their own hostname or the client ends up
+					// dialling the origin from a network that only reaches the relay.
+					if strings.Contains(name, ".") {
+						backend = name
+					} else {
+						backend = BackendHost(host)
+					}
 				}
-				// The reference's camouflage port is not a reliable data-plane port.
+				// The advertised port is the first candidate; dialTunnel falls back to
+				// the other TLS data ports when it is closed on that address.
 				port := uint16(443)
-				if text := field(node, "backend_port", "real_port"); text != "" {
+				if text := field(node, "backend_port", "real_port", "port"); text != "" {
 					number, err := strconv.ParseUint(text, 10, 16)
 					if err != nil || number == 0 {
 						continue
 					}
 					port = uint16(number)
 				}
-				nodeName := scalar(node["name"])
+				nodeName := name
 				if nodeName == "" {
-					nodeName = name
+					nodeName = scalar(node["name"])
 				}
-				endpoint := Endpoint{Backend: backend, Port: port, Node: nodeName, Handshake: HandshakeOptions{Host: host, UID: uid, AccessToken: token, Device: device, Platform: "windows", Version: "3.13.0", TunnelIP: "10.10.10.2", TunnelGateway: "10.10.10.250"}}
+				endpoint := Endpoint{Backend: backend, Port: port, Node: nodeName, Handshake: HandshakeOptions{Host: host, UID: uid, AccessToken: token, Device: device, Platform: "windows", Version: "3.13.0", TunnelIP: RandomTunnelAddress(), TunnelGateway: TunnelGateway}}
 				key := endpoint.Backend + ":" + strconv.FormatUint(uint64(endpoint.Port), 10)
 				if _, loaded := seen[key]; loaded {
 					continue

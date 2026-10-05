@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"time"
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/outbound"
@@ -18,6 +19,20 @@ import (
 	N "github.com/sagernet/sing/common/network"
 )
 
+const (
+	ahaHandshakeTimeout = 7 * time.Second
+	ahaProbeTimeout     = 5 * time.Second
+	// Entries go stale and are reachable from different networks independently, so
+	// a bounded set is raced in parallel and the first working tunnel wins.
+	ahaCandidateLimit = 6
+	ahaAttemptLimit   = 12
+)
+
+// ahaDataPorts are the TLS data-plane ports seen open on the provider's hosts.
+// A host may advertise a camouflage port that is closed, so the advertised value
+// is only the first candidate.
+var ahaDataPorts = []uint16{3306, 6379, 443}
+
 func sameNodeIdentity(a, b string) bool {
 	a = strings.ToLower(strings.TrimSuffix(a, ".wishadmin.com"))
 	b = strings.ToLower(strings.TrimSuffix(b, ".wishadmin.com"))
@@ -26,10 +41,31 @@ func sameNodeIdentity(a, b string) bool {
 	return a == b
 }
 
+func ahaPortCandidates(port uint16) []uint16 {
+	var ports []uint16
+	for _, candidate := range append([]uint16{port}, ahaDataPorts...) {
+		if candidate == 0 {
+			continue
+		}
+		duplicate := false
+		for _, existing := range ports {
+			if existing == candidate {
+				duplicate = true
+				break
+			}
+		}
+		if !duplicate {
+			ports = append(ports, candidate)
+		}
+	}
+	return ports
+}
+
 // RegisterOutbound only supplies a migration error for old configurations.
 func RegisterOutbound(registry *outbound.Registry) {
 	outbound.Register[option.AHAOutboundOptions](registry, C.TypeAHA, NewOutbound)
 }
+
 func NewOutbound(ctx context.Context, _ adapter.Router, logger log.ContextLogger, tag string, o option.AHAOutboundOptions) (adapter.Outbound, error) {
 	return newTunnel(ctx, logger, tag, o)
 }
@@ -61,68 +97,177 @@ func newTunnel(ctx context.Context, logger log.ContextLogger, tag string, o opti
 	return &Outbound{Adapter: outbound.NewAdapterWithDialerOptions(C.TypeAHA, tag, []string{N.NetworkTCP}, o.DialerOptions), ctx: ctx, logger: logger, options: o, node: o.Node, discovery: discovery, dialer: d}, nil
 }
 
-// DialTunnel discovers account-specific credentials and opens the raw IPv4
-// data plane. Never return this directly as an application TCP stream.
-func (h *Outbound) dialTunnel(ctx context.Context) (net.Conn, T.Endpoint, error) {
-	var endpoint T.Endpoint
-	var err error
-	if h.node != "" {
-		multi, ok := h.discovery.(T.MultiDiscovery)
-		if !ok {
-			return nil, T.Endpoint{}, fmt.Errorf("aha: node selection requires multi-node discovery")
+// candidates orders the discovered nodes so the configured one is tried first and
+// every sibling in the same region remains a fallback: individual entries go stale
+// or become unreachable independently.
+func (h *Outbound) candidates(ctx context.Context) ([]T.Endpoint, error) {
+	multi, multiOK := h.discovery.(T.MultiDiscovery)
+	if h.node == "" {
+		if multiOK {
+			endpoints, err := multi.DiscoverAll(ctx, h.options.Username, h.options.Password, h.options.Region)
+			if err == nil && len(endpoints) > 0 {
+				return endpoints, nil
+			}
 		}
-		var endpoints []T.Endpoint
-		endpoints, err = multi.DiscoverAll(ctx, h.options.Username, h.options.Password, h.options.Region)
-		for _, candidate := range endpoints {
-			if sameNodeIdentity(candidate.Node, h.node) || sameNodeIdentity(candidate.Backend, h.node) {
-				endpoint = candidate
+		endpoint, err := h.discovery.Discover(ctx, h.options.Username, h.options.Password, h.options.Region)
+		if err != nil {
+			return nil, fmt.Errorf("aha: account discovery failed: %w", err)
+		}
+		return []T.Endpoint{endpoint}, nil
+	}
+	if !multiOK {
+		return nil, fmt.Errorf("aha: node selection requires multi-node discovery")
+	}
+	endpoints, err := multi.DiscoverAll(ctx, h.options.Username, h.options.Password, h.options.Region)
+	if err != nil {
+		return nil, fmt.Errorf("aha: account discovery failed: %w", err)
+	}
+	var ordered []T.Endpoint
+	for _, candidate := range endpoints {
+		if sameNodeIdentity(candidate.Node, h.node) || sameNodeIdentity(candidate.Backend, h.node) {
+			ordered = append(ordered, candidate)
+		}
+	}
+	if len(ordered) == 0 {
+		// A configured name that no entry matches (display names change and differ from
+		// the entry hostname) must not fail startup: the region's entries are still usable.
+		h.logger.Debug("aha: configured node ", h.node, " is not in the discovered set, using the region")
+		return endpoints, nil
+	}
+	for _, candidate := range endpoints {
+		known := false
+		for _, selected := range ordered {
+			if selected.Backend == candidate.Backend && selected.Port == candidate.Port {
+				known = true
 				break
 			}
 		}
-		if endpoint.Backend == "" && err == nil {
-			err = fmt.Errorf("aha: discovered node %q not found", h.node)
+		if !known {
+			ordered = append(ordered, candidate)
 		}
-	} else {
-		endpoint, err = h.discovery.Discover(ctx, h.options.Username, h.options.Password, h.options.Region)
 	}
+	return ordered, nil
+}
+
+type ahaAttempt struct {
+	endpoint T.Endpoint
+	port     uint16
+	address  string
+}
+
+// DialTunnel discovers account-specific credentials and opens the raw IPv4
+// data plane. Never return this directly as an application TCP stream.
+func (h *Outbound) dialTunnel(ctx context.Context) (net.Conn, T.Endpoint, error) {
+	candidates, err := h.candidates(ctx)
 	if err != nil {
-		return nil, T.Endpoint{}, fmt.Errorf("aha: account discovery failed: %w", err)
-	}
-	if err = endpoint.Handshake.Validate(); err != nil {
 		return nil, T.Endpoint{}, err
 	}
-	if endpoint.Backend == "" {
-		endpoint.Backend = T.BackendHost(endpoint.Handshake.Host)
+	var plan []ahaAttempt
+	var lastErr error
+	candidates = candidates[:min(len(candidates), ahaCandidateLimit)]
+	for _, endpoint := range candidates {
+		if err = endpoint.Handshake.Validate(); err != nil {
+			lastErr = err
+			continue
+		}
+		ports := ahaPortCandidates(endpoint.Port)
+		if len(ports) > 2 {
+			ports = ports[:2]
+		}
+		for _, port := range ports {
+			// The advertised tunnel address may already be held by another session;
+			// the server then refuses the handshake, so a fresh address is offered.
+			plan = append(plan, ahaAttempt{endpoint, port, T.RandomTunnelAddress()})
+		}
 	}
-	if endpoint.Port == 0 {
-		endpoint.Port = 443
+	if len(plan) == 0 {
+		if lastErr == nil {
+			lastErr = fmt.Errorf("aha: discovery returned no usable node")
+		}
+		return nil, T.Endpoint{}, lastErr
 	}
+	if len(plan) > ahaAttemptLimit {
+		plan = plan[:ahaAttemptLimit]
+	}
+	type outcome struct {
+		conn     net.Conn
+		endpoint T.Endpoint
+		address  string
+		err      error
+	}
+	raceCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	outcomes := make(chan outcome, len(plan))
+	for _, attempt := range plan {
+		go func(attempt ahaAttempt) {
+			conn, err := h.openTunnel(raceCtx, attempt)
+			outcomes <- outcome{conn, attempt.endpoint, attempt.address, err}
+		}(attempt)
+	}
+	for range plan {
+		result := <-outcomes
+		if result.err == nil {
+			cancel()
+			// Losers finish in the background; close anything that still connects.
+			go func() {
+				for remaining := range outcomes {
+					if remaining.conn != nil {
+						remaining.conn.Close()
+					}
+				}
+			}()
+			// The endpoint must report the address the server actually accepted; the
+			// caller assigns it to the tunnel device and the peer NATs to that value.
+			endpoint := result.endpoint
+			endpoint.Handshake.TunnelIP = result.address
+			return result.conn, endpoint, nil
+		}
+		lastErr = result.err
+	}
+	return nil, T.Endpoint{}, fmt.Errorf("aha: no usable node: %w", lastErr)
+}
+
+func (h *Outbound) openTunnel(ctx context.Context, attempt ahaAttempt) (net.Conn, error) {
+	handshake := attempt.endpoint.Handshake
+	handshake.TunnelIP = attempt.address
 	tlsOptions := option.OutboundTLSOptions{Enabled: true}
 	if h.options.TLS != nil {
 		tlsOptions = *h.options.TLS
 	}
-	if !tlsOptions.Enabled || tlsOptions.DisableSNI || (tlsOptions.ServerName != "" && tlsOptions.ServerName != endpoint.Backend) {
-		return nil, T.Endpoint{}, fmt.Errorf("aha: requires TLS SNI matching discovered backend host")
+	if !tlsOptions.Enabled {
+		return nil, fmt.Errorf("aha: TLS is required for the data plane")
 	}
 	for _, alpn := range tlsOptions.ALPN {
 		if alpn != "http/1.1" {
-			return nil, T.Endpoint{}, fmt.Errorf("aha: only HTTP/1.1 ALPN is supported")
+			return nil, fmt.Errorf("aha: only HTTP/1.1 ALPN is supported")
 		}
 	}
-	// The API's host is the camouflage/HTTP Host value (for example
-	// dubai1.baidu.com). The discovered backend is the TLS virtual host and
-	// certificate identity (for example dubai1.wishadmin.com).
-	tlsOptions.ServerName = endpoint.Backend
-	config, err := tls.NewClient(h.ctx, h.logger, endpoint.Backend, tlsOptions)
+	// The server selects the tunnel from the camouflage SNI while its certificate is
+	// issued for the provider host, so a verified handshake can never match a working
+	// vhost. The session is authenticated by the account token, not by the certificate.
+	tlsOptions.ServerName = handshake.Host
+	tlsOptions.Insecure = true
+	config, err := tls.NewClient(h.ctx, h.logger, handshake.Host, tlsOptions)
 	if err != nil {
-		return nil, T.Endpoint{}, err
+		return nil, err
 	}
-	raw, err := h.dialer.DialContext(ctx, N.NetworkTCP, M.ParseSocksaddrHostPort(endpoint.Backend, endpoint.Port))
+	attemptCtx, cancel := context.WithTimeout(ctx, ahaHandshakeTimeout)
+	defer cancel()
+	raw, err := h.dialer.DialContext(attemptCtx, N.NetworkTCP, M.ParseSocksaddrHostPort(attempt.endpoint.Backend, attempt.port))
 	if err != nil {
-		return nil, T.Endpoint{}, err
+		return nil, err
 	}
-	conn, err := T.Handshake(ctx, raw, config, endpoint.Handshake)
-	return conn, endpoint, err
+	conn, err := T.Handshake(attemptCtx, raw, config, handshake)
+	if err != nil {
+		return nil, err
+	}
+	probeCtx, cancelProbe := context.WithTimeout(attemptCtx, ahaProbeTimeout)
+	defer cancelProbe()
+	if err = T.ProbeTunnel(probeCtx, conn, attempt.address); err != nil {
+		conn.Close()
+		return nil, err
+	}
+	return conn, nil
 }
 
 func (*Outbound) DialContext(_ context.Context, network string, _ M.Socksaddr) (net.Conn, error) {
@@ -131,6 +276,7 @@ func (*Outbound) DialContext(_ context.Context, network string, _ M.Socksaddr) (
 	}
 	return nil, fmt.Errorf("aha: TCP-to-IPv4 bridge is not implemented; raw L3 tunnel is available through DialTunnel")
 }
+
 func (*Outbound) ListenPacket(context.Context, M.Socksaddr) (net.PacketConn, error) {
 	return nil, fmt.Errorf("aha: UDP/ListenPacket is not implemented")
 }

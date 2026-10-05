@@ -34,3 +34,19 @@ func TestRegistrationAndUnsupportedNetworks(t *testing.T) {
 		t.Fatalf("%v", err)
 	}
 }
+
+func TestPortCandidatesKeepTheAdvertisedPortFirst(t *testing.T) {
+	ports := ahaPortCandidates(6379)
+	if len(ports) == 0 || ports[0] != 6379 {
+		t.Fatalf("advertised port is not tried first: %v", ports)
+	}
+	if len(ports) != 3 {
+		t.Fatalf("expected three distinct candidates, got %v", ports)
+	}
+	if ports = ahaPortCandidates(443); ports[0] != 443 {
+		t.Fatalf("advertised port 443 is not first: %v", ports)
+	}
+	if ports = ahaPortCandidates(0); len(ports) != 3 || ports[0] != 3306 {
+		t.Fatalf("zero port must fall back to the TLS data ports: %v", ports)
+	}
+}
