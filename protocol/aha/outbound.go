@@ -56,7 +56,7 @@ func newTunnel(ctx context.Context, logger log.ContextLogger, tag string, o opti
 func (h *Outbound) dialTunnel(ctx context.Context) (net.Conn, T.Endpoint, error) {
 	endpoint, err := h.discovery.Discover(ctx, h.options.Username, h.options.Password, h.options.Region)
 	if err != nil {
-		return nil, T.Endpoint{}, fmt.Errorf("aha: account discovery failed")
+		return nil, T.Endpoint{}, fmt.Errorf("aha: account discovery failed: %w", err)
 	}
 	if err = endpoint.Handshake.Validate(); err != nil {
 		return nil, T.Endpoint{}, err

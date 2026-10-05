@@ -68,6 +68,10 @@ func scalar(value any) string {
 		return v
 	case json.Number:
 		return string(v)
+	case int:
+		return strconv.Itoa(v)
+	case float64:
+		return strconv.FormatFloat(v, 'f', -1, 64)
 	}
 	return ""
 }
@@ -147,7 +151,9 @@ func (h *HubDiscovery) Discover(ctx context.Context, username, password, region 
 		return Endpoint{}, err
 	}
 	token := accessToken(access)
-	if token == "" || token == session {
+	// Trust only the access response as the source. The service may return the
+	// same value for signin and access; equality does not invalidate access.
+	if token == "" {
 		return Endpoint{}, fmt.Errorf("aha: access response lacks explicitly labelled persistent token; refusing signin fallback")
 	}
 	nodes, err := h.request(ctx, append(append([]Parameter{}, authenticated...), Parameter{"cmd", "node"}))
