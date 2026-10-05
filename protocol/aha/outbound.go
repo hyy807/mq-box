@@ -18,6 +18,14 @@ import (
 	N "github.com/sagernet/sing/common/network"
 )
 
+func sameNodeIdentity(a, b string) bool {
+	a = strings.ToLower(strings.TrimSuffix(a, ".wishadmin.com"))
+	b = strings.ToLower(strings.TrimSuffix(b, ".wishadmin.com"))
+	a = strings.TrimSuffix(a, ".baidu.com")
+	b = strings.TrimSuffix(b, ".baidu.com")
+	return a == b
+}
+
 // RegisterOutbound only supplies a migration error for old configurations.
 func RegisterOutbound(registry *outbound.Registry) {
 	outbound.Register[option.AHAOutboundOptions](registry, C.TypeAHA, NewOutbound)
@@ -66,7 +74,7 @@ func (h *Outbound) dialTunnel(ctx context.Context) (net.Conn, T.Endpoint, error)
 		var endpoints []T.Endpoint
 		endpoints, err = multi.DiscoverAll(ctx, h.options.Username, h.options.Password, h.options.Region)
 		for _, candidate := range endpoints {
-			if strings.EqualFold(candidate.Node, h.node) || strings.EqualFold(candidate.Backend, h.node) {
+			if sameNodeIdentity(candidate.Node, h.node) || sameNodeIdentity(candidate.Backend, h.node) {
 				endpoint = candidate
 				break
 			}
