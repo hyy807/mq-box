@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"strings"
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/outbound"
@@ -65,7 +66,7 @@ func (h *Outbound) dialTunnel(ctx context.Context) (net.Conn, T.Endpoint, error)
 		var endpoints []T.Endpoint
 		endpoints, err = multi.DiscoverAll(ctx, h.options.Username, h.options.Password, h.options.Region)
 		for _, candidate := range endpoints {
-			if candidate.Node == h.node || candidate.Backend == h.node {
+			if strings.EqualFold(candidate.Node, h.node) || strings.EqualFold(candidate.Backend, h.node) {
 				endpoint = candidate
 				break
 			}

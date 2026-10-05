@@ -210,7 +210,11 @@ func (h *HubDiscovery) DiscoverAll(ctx context.Context, username, password, regi
 					}
 					port = uint16(number)
 				}
-				endpoint := Endpoint{Backend: backend, Port: port, Node: name, Handshake: HandshakeOptions{Host: host, UID: uid, AccessToken: token, Device: device, Platform: "windows", Version: "3.13.0", TunnelIP: "10.10.10.2", TunnelGateway: "10.10.10.250"}}
+				nodeName := scalar(node["name"])
+				if nodeName == "" {
+					nodeName = name
+				}
+				endpoint := Endpoint{Backend: backend, Port: port, Node: nodeName, Handshake: HandshakeOptions{Host: host, UID: uid, AccessToken: token, Device: device, Platform: "windows", Version: "3.13.0", TunnelIP: "10.10.10.2", TunnelGateway: "10.10.10.250"}}
 				key := endpoint.Backend + ":" + strconv.FormatUint(uint64(endpoint.Port), 10)
 				if _, loaded := seen[key]; loaded {
 					continue
