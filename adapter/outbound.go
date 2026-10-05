@@ -37,6 +37,15 @@ type FlowOutbound interface {
 	PreMatchFlow(network string, destination netip.Addr) PreMatchAction
 }
 
+// OutboundWithLatencyTest reports the round-trip time to a node without opening
+// the outbound's data plane. Outbounds that must carry a whole IP stack to move a
+// single byte (endpoints over raw L3 tunnels) implement this so that a group
+// latency test does not allocate one data plane per member.
+type OutboundWithLatencyTest interface {
+	Outbound
+	TestLatency(ctx context.Context) (uint16, error)
+}
+
 type OutboundRegistry interface {
 	option.OutboundOptionsRegistry
 	CreateOutbound(ctx context.Context, router Router, logger log.ContextLogger, tag string, outboundType string, options any) (Outbound, error)

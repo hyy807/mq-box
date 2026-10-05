@@ -82,6 +82,12 @@ func (s *HistoryStorage) Close() error {
 }
 
 func URLTest(ctx context.Context, link string, detour N.Dialer) (uint16, error) {
+	// An outbound that has to bring up a full IP stack per request answers the
+	// latency question itself, so a test of every group member never dials a data
+	// plane per member.
+	if latencyTester, isLatencyTester := common.Cast[adapter.OutboundWithLatencyTest](detour); isLatencyTester {
+		return latencyTester.TestLatency(ctx)
+	}
 	multiplexOutbound, isMultiplexOutbound := common.Cast[adapter.OutboundWithMultiplex](detour)
 	if isMultiplexOutbound && multiplexOutbound.MultiplexEnabled() {
 		warmContext := adapter.ContextWithKeepSession(ctx)

@@ -3,6 +3,7 @@ package aha
 import (
 	"context"
 	"fmt"
+	"math"
 	"net"
 	"net/netip"
 	"sync"
@@ -28,16 +29,87 @@ const (
 	ahaReconnectMaxBackoff     = 15 * time.Second
 	// How long a flow waits for the tunnel to come up on demand.
 	ahaConnectWait = 10 * time.Second
+	// A data plane is a complete Go IP stack, so a node list is cheap only while
+	// the nodes are unused: the stack is built when a flow first needs the node and
+	// dropped again once the node has been idle. Without this, a 195 node list costs
+	// ~18 MB of the NetworkExtension budget before a single byte is proxied.
+	ahaMaxIdleDataPlanes = 3
+	ahaMaxLiveDataPlanes = 6
+	ahaIdleDataPlaneAge  = 30 * time.Second
 )
+
+// A latency test of a whole node list runs every member at once; each probe holds a
+// TLS session, so the concurrency is bounded to keep the peak inside the extension
+// budget while still finishing a 200 node list in a few seconds.
+const ahaMaxConcurrentProbes = 48
+
+var ahaProbeSlots = make(chan struct{}, ahaMaxConcurrentProbes)
+
+// liveDataPlanes tracks the endpoints of this process that currently hold a data
+// plane, oldest first, so a node burst cannot keep one IP stack per node alive.
+var liveDataPlanes struct {
+	mu   sync.Mutex
+	list []*Endpoint
+}
+
+func registerLiveDataPlane(e *Endpoint) {
+	liveDataPlanes.mu.Lock()
+	defer liveDataPlanes.mu.Unlock()
+	kept := make([]*Endpoint, 0, len(liveDataPlanes.list)+1)
+	for _, other := range liveDataPlanes.list {
+		if other != e && !other.closed.Load() {
+			kept = append(kept, other)
+		}
+	}
+	kept = append(kept, e)
+	liveDataPlanes.list = kept
+	now := time.Now().UnixNano()
+	var evict []*Endpoint
+	live := len(kept)
+	for _, other := range kept[:len(kept)-1] {
+		if live <= ahaMaxIdleDataPlanes {
+			break
+		}
+		idle := now-other.lastUsed.Load() > int64(ahaIdleDataPlaneAge)
+		if idle || live > ahaMaxLiveDataPlanes {
+			evict = append(evict, other)
+			live--
+		}
+	}
+	if len(evict) > 0 {
+		liveDataPlanes.list = kept[len(evict):]
+	}
+	go func() {
+		for _, victim := range evict {
+			if victim.logger != nil {
+				victim.logger.Debug("aha: releasing the idle data plane")
+			}
+			victim.releaseDataPlane()
+		}
+	}()
+}
+
+func unregisterLiveDataPlane(e *Endpoint) {
+	liveDataPlanes.mu.Lock()
+	defer liveDataPlanes.mu.Unlock()
+	kept := liveDataPlanes.list[:0]
+	for _, other := range liveDataPlanes.list {
+		if other != e {
+			kept = append(kept, other)
+		}
+	}
+	liveDataPlanes.list = kept
+}
 
 func RegisterEndpoint(registry *endpoint.Registry) {
 	endpoint.Register[option.AHAEndpointOptions](registry, C.TypeAHA, NewEndpoint)
 }
 
 var (
-	_ adapter.Endpoint     = (*Endpoint)(nil)
-	_ adapter.FlowOutbound = (*Endpoint)(nil)
-	_ tun.Handler          = (*Endpoint)(nil)
+	_ adapter.Endpoint                = (*Endpoint)(nil)
+	_ adapter.FlowOutbound            = (*Endpoint)(nil)
+	_ adapter.OutboundWithLatencyTest = (*Endpoint)(nil)
+	_ tun.Handler                     = (*Endpoint)(nil)
 )
 
 // Endpoint connects the core's Go IP stack and native TUN flow return path to
@@ -55,15 +127,23 @@ type Endpoint struct {
 	dns      adapter.DNSRouter
 	tunnel   *Outbound
 	device   device.Device
-	address  netip.Addr
-	ready    atomic.Bool
-	closed   atomic.Bool
-	stop     chan struct{}
-	stopOnce sync.Once
-	mu       sync.Mutex
-	conn     net.Conn
-	framer   *T.Framer
-	done     chan struct{}
+	deviceMu sync.Mutex
+	// deviceCtx is the service scope, kept because the data plane may be built long
+	// after Start.
+	deviceCtx context.Context
+	address   netip.Addr
+	ready     atomic.Bool
+	closed    atomic.Bool
+	stop      chan struct{}
+	stopOnce  sync.Once
+	mu        sync.Mutex
+	conn      net.Conn
+	framer    *T.Framer
+	done      chan struct{}
+
+	// lastUsed is the last time this node carried a packet, used to decide which
+	// data plane to release first.
+	lastUsed atomic.Int64
 
 	readerStarted atomic.Bool
 	connectMu     sync.Mutex
@@ -78,10 +158,19 @@ func NewEndpoint(ctx context.Context, router adapter.Router, logger log.ContextL
 	options.Account = ""
 	options.Username, options.Password = credentials.Username, credentials.Password
 	tunnel, err := newTunnel(ctx, logger, tag, options)
-	if err != nil {
-		return nil, err
-	}
-	return &Endpoint{Adapter: endpoint.NewAdapterWithDialerOptions(C.TypeAHA, tag, []string{N.NetworkTCP, N.NetworkUDP, N.NetworkICMP}, options.DialerOptions), ctx: ctx, router: router, logger: logger, dns: service.FromContext[adapter.DNSRouter](ctx), tunnel: tunnel}, nil
+	// The router may fetch its rule sets through this endpoint before Start runs
+	// (an initial rule-set download goes through the default HTTP client), so the
+	// address and the scope context are seeded here as well.
+	return &Endpoint{
+		Adapter:   endpoint.NewAdapterWithDialerOptions(C.TypeAHA, tag, []string{N.NetworkTCP, N.NetworkUDP, N.NetworkICMP}, options.DialerOptions),
+		ctx:       ctx,
+		router:    router,
+		logger:    logger,
+		dns:       service.FromContext[adapter.DNSRouter](ctx),
+		tunnel:    tunnel,
+		deviceCtx: ctx,
+		address:   netip.MustParseAddr(T.RandomTunnelAddress()),
+	}, nil
 }
 
 func (e *Endpoint) Start(stage adapter.StartStage, scope *adapter.Scope) error {
@@ -90,35 +179,59 @@ func (e *Endpoint) Start(stage adapter.StartStage, scope *adapter.Scope) error {
 	}
 	e.stop = make(chan struct{})
 	e.done = make(chan struct{})
+	e.deviceCtx = scope.Context()
+	e.lastUsed.Store(time.Now().UnixNano())
 	scope.Add(func() error { return e.shutdown() })
 	// The address is chosen up front and offered during the handshake, so the TUN
 	// address the peer NATs to is known before the first connection exists.
 	e.address = netip.MustParseAddr(T.RandomTunnelAddress())
 	e.tunnel.preferredAddress = e.address.String()
-	options := device.Options{Context: scope.Context(), Logger: e.logger, Handler: e, MTU: 1500, UDPTimeout: C.UDPTimeout, ICMPTimeout: C.ICMPTimeout, Configuration: e.configuration(e.address)}
+	// The data plane is deliberately not built here: a node list only has to be
+	// cheap, and a node that is never used must not hold an IP stack.
+	return nil
+}
+
+// ensureDataPlane builds the Go IP stack of this node on first use.
+func (e *Endpoint) ensureDataPlane() (device.Device, error) {
+	e.deviceMu.Lock()
+	defer e.deviceMu.Unlock()
+	if e.device != nil {
+		return e.device, nil
+	}
+	if e.closed.Load() {
+		return nil, fmt.Errorf("aha: endpoint is closed")
+	}
+	options := device.Options{Context: e.deviceCtx, Logger: e.logger, Handler: e, MTU: 1500, UDPTimeout: C.UDPTimeout, ICMPTimeout: C.ICMPTimeout, Configuration: e.configuration(e.address)}
 	if manager := service.FromContext[adapter.NetworkManager](e.ctx); manager != nil {
 		options.InterfaceFinder = manager.InterfaceFinder()
 	}
 	d, err := device.New(options)
 	if err != nil {
-		e.shutdown()
-		return err
+		return nil, err
 	}
-	e.device = d
 	d.SetPacketWriter(e.writeBuffers)
 	if err = d.Start(); err != nil {
 		d.Close()
-		e.shutdown()
-		return err
+		return nil, err
 	}
-	scope.Add(func() error {
-		e.shutdown()
-		if e.readerStarted.Load() {
-			<-e.done
-		}
-		return d.Close()
-	})
-	return nil
+	e.device = d
+	e.lastUsed.Store(time.Now().UnixNano())
+	registerLiveDataPlane(e)
+	return d, nil
+}
+
+// releaseDataPlane drops the data plane of an idle node; the next flow rebuilds it.
+func (e *Endpoint) releaseDataPlane() {
+	e.deviceMu.Lock()
+	d := e.device
+	e.device = nil
+	e.deviceMu.Unlock()
+	if d == nil {
+		return
+	}
+	e.ready.Store(false)
+	e.closeConn()
+	_ = d.Close()
 }
 
 func (e *Endpoint) configuration(address netip.Addr) device.Configuration {
@@ -147,8 +260,8 @@ func (e *Endpoint) closeConn() {
 	}
 }
 
-// shutdown stops reconnection and releases the socket; it is idempotent because
-// both the service scope and the reader can reach it.
+// shutdown stops reconnection and releases the socket and the data plane; it is
+// idempotent because both the service scope and the reader can reach it.
 func (e *Endpoint) shutdown() error {
 	e.closed.Store(true)
 	e.ready.Store(false)
@@ -158,6 +271,20 @@ func (e *Endpoint) shutdown() error {
 		}
 	})
 	e.closeConn()
+	if e.readerStarted.Load() {
+		select {
+		case <-e.done:
+		case <-time.After(2 * time.Second):
+		}
+	}
+	unregisterLiveDataPlane(e)
+	e.deviceMu.Lock()
+	d := e.device
+	e.device = nil
+	e.deviceMu.Unlock()
+	if d != nil {
+		_ = d.Close()
+	}
 	return nil
 }
 
@@ -220,16 +347,21 @@ func (e *Endpoint) connect() (net.Conn, T.Endpoint, error) {
 	}
 	address := netip.MustParseAddr(discovered.Handshake.TunnelIP)
 	e.storeConn(conn)
+	var dataPlane device.Device
+	dataPlane, err = e.ensureDataPlane()
+	if err != nil {
+		e.closeConn()
+		return nil, T.Endpoint{}, err
+	}
 	if address != e.address {
 		e.address = address
-		if e.device != nil {
-			if err = e.device.UpdateConfiguration(e.configuration(address)); err != nil {
-				e.logger.Warn("aha: updating the tunnel address failed: ", err)
-			}
+		if err = dataPlane.UpdateConfiguration(e.configuration(address)); err != nil {
+			e.logger.Warn("aha: updating the tunnel address failed: ", err)
 		}
 	}
 	e.tunnel.preferredAddress = address.String()
 	e.ready.Store(true)
+	e.lastUsed.Store(time.Now().UnixNano())
 	if e.readerStarted.CompareAndSwap(false, true) {
 		go e.readLoop()
 	}
@@ -253,7 +385,17 @@ func (e *Endpoint) readLoop() {
 			continue
 		}
 		b := buf.As(packet)
-		err = e.device.WriteInboundBuffers([]*buf.Buffer{b})
+		e.deviceMu.Lock()
+		d := e.device
+		e.deviceMu.Unlock()
+		if d == nil {
+			// Only flows this endpoint dialled can return traffic, so this is a
+			// leftover packet after the data plane was released.
+			b.Release()
+			continue
+		}
+		e.lastUsed.Store(time.Now().UnixNano())
+		err = d.WriteInboundBuffers([]*buf.Buffer{b})
 		b.Release()
 		if err != nil {
 			return
@@ -327,26 +469,35 @@ func (e *Endpoint) PreMatchFlow(_ string, destination netip.Addr) adapter.PreMat
 }
 
 func (e *Endpoint) PortAddresses() (netip.Addr, netip.Addr) {
-	if e.device == nil {
-		return netip.Addr{}, netip.Addr{}
+	e.deviceMu.Lock()
+	d := e.device
+	e.deviceMu.Unlock()
+	if d == nil {
+		// The address is offered during the handshake before any data plane exists,
+		// so the flow dispatcher already knows this node's own address space.
+		return e.address, netip.Addr{}
 	}
-	return e.device.PortAddresses()
+	return d.PortAddresses()
 }
 
 func (e *Endpoint) PortMTU() uint32 { return 1500 }
 
 func (e *Endpoint) AttachReturn(r tun.Return) error {
-	if e.device == nil {
-		return fmt.Errorf("aha: device not started")
+	d, err := e.ensureDataPlane()
+	if err != nil {
+		return err
 	}
-	return e.device.AttachReturn(r)
+	return d.AttachReturn(r)
 }
 
 func (e *Endpoint) DetachReturn(r tun.Return) error {
-	if e.device == nil {
+	e.deviceMu.Lock()
+	d := e.device
+	e.deviceMu.Unlock()
+	if d == nil {
 		return nil
 	}
-	return e.device.DetachReturn(r)
+	return d.DetachReturn(r)
 }
 
 func (e *Endpoint) JudgeFlow(network uint8, source, destination netip.AddrPort, firstPacket []byte) tun.FlowVerdict {
@@ -402,9 +553,6 @@ func isFakeAddress(address netip.Addr) bool {
 }
 
 func (e *Endpoint) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
-	if e.device == nil {
-		return nil, fmt.Errorf("aha: device not started")
-	}
 	if err := e.ensureConnected(ctx); err != nil {
 		return nil, err
 	}
@@ -412,13 +560,16 @@ func (e *Endpoint) DialContext(ctx context.Context, network string, destination 
 	if err != nil {
 		return nil, err
 	}
-	return e.device.DialContext(ctx, network, resolved)
+	dataPlane, err := e.ensureDataPlane()
+	if err != nil {
+		return nil, err
+	}
+	e.lastUsed.Store(time.Now().UnixNano())
+	conn, err := dataPlane.DialContext(ctx, network, resolved)
+	return conn, err
 }
 
 func (e *Endpoint) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
-	if e.device == nil {
-		return nil, fmt.Errorf("aha: device not started")
-	}
 	if err := e.ensureConnected(ctx); err != nil {
 		return nil, err
 	}
@@ -426,12 +577,45 @@ func (e *Endpoint) ListenPacket(ctx context.Context, destination M.Socksaddr) (n
 	if err != nil {
 		return nil, err
 	}
-	conn, err := e.device.ListenPacket(ctx, resolved)
+	dataPlane, err := e.ensureDataPlane()
+	if err != nil {
+		return nil, err
+	}
+	e.lastUsed.Store(time.Now().UnixNano())
+	conn, err := dataPlane.ListenPacket(ctx, resolved)
 	if err != nil {
 		return nil, err
 	}
 	// Keep the original domain destination usable by ordinary UDP routing.
 	return &packetConn{PacketConn: conn, original: destination, resolved: resolved}, nil
+}
+
+// TestLatency answers a node latency test with the round-trip time of a probe
+// carried by the node's own tunnel. It opens no data plane: a latency test of a
+// whole node list would otherwise build one Go IP stack per node, which is what
+// pushes the iOS extension into memory pressure.
+func (e *Endpoint) TestLatency(ctx context.Context) (uint16, error) {
+	select {
+	case ahaProbeSlots <- struct{}{}:
+	case <-ctx.Done():
+		return 0, ctx.Err()
+	}
+	defer func() { <-ahaProbeSlots }()
+	start := time.Now()
+	conn, discovered, err := e.tunnel.dialTunnelForProbe(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer conn.Close()
+	if err = T.ProbeTunnel(ctx, conn, discovered.Handshake.TunnelIP); err != nil {
+		return 0, err
+	}
+	delay := time.Since(start)
+	if delay > math.MaxUint16*time.Millisecond {
+		delay = math.MaxUint16 * time.Millisecond
+	}
+	e.lastUsed.Store(time.Now().UnixNano())
+	return uint16(delay.Milliseconds()), nil
 }
 
 type packetConn struct {

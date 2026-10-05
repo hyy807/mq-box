@@ -203,6 +203,18 @@ type ahaAttempt struct {
 // DialTunnel discovers account-specific credentials and opens the raw IPv4
 // data plane. Never return this directly as an application TCP stream.
 func (h *Outbound) dialTunnel(ctx context.Context) (net.Conn, T.Endpoint, error) {
+	return h.dialTunnelPreferred(ctx, h.preferredAddress)
+}
+
+// dialTunnelForProbe opens a tunnel for a latency probe. It never offers the
+// address the endpoint's data plane holds: the peer treats a second session
+// claiming that address as a takeover and stops NATing the first one, which
+// silently kills a working data plane.
+func (h *Outbound) dialTunnelForProbe(ctx context.Context) (net.Conn, T.Endpoint, error) {
+	return h.dialTunnelPreferred(ctx, "")
+}
+
+func (h *Outbound) dialTunnelPreferred(ctx context.Context, preferredAddress string) (net.Conn, T.Endpoint, error) {
 	candidates, err := h.candidates(ctx)
 	if err != nil {
 		return nil, T.Endpoint{}, err
@@ -223,8 +235,8 @@ func (h *Outbound) dialTunnel(ctx context.Context) (net.Conn, T.Endpoint, error)
 			// The advertised tunnel address may already be held by another session;
 			// the server then refuses the handshake, so a fresh address is offered.
 			address := T.RandomTunnelAddress()
-			if len(plan) == 0 && h.preferredAddress != "" {
-				address = h.preferredAddress
+			if len(plan) == 0 && preferredAddress != "" {
+				address = preferredAddress
 			}
 			plan = append(plan, ahaAttempt{endpoint, port, address})
 		}
