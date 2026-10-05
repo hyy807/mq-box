@@ -203,7 +203,7 @@ func (h *HubDiscovery) DiscoverAll(ctx context.Context, username, password, regi
 				}
 				// The reference's camouflage port is not a reliable data-plane port.
 				port := uint16(443)
-				if text := field(node, "backend_port", "real_port", "port"); text != "" {
+				if text := field(node, "backend_port", "real_port"); text != "" {
 					number, err := strconv.ParseUint(text, 10, 16)
 					if err != nil || number == 0 {
 						continue
