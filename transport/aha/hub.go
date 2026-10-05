@@ -129,17 +129,29 @@ func accessToken(value map[string]any) string {
 }
 
 func (h *HubDiscovery) Discover(ctx context.Context, username, password, region string) (Endpoint, error) {
+	endpoints, err := h.DiscoverAll(ctx, username, password, region)
+	if err != nil {
+		return Endpoint{}, err
+	}
+	if len(endpoints) == 0 {
+		return Endpoint{}, fmt.Errorf("aha: no node matching region")
+	}
+	return endpoints[0], nil
+}
+
+// DiscoverAll returns every usable node in the requested region.
+func (h *HubDiscovery) DiscoverAll(ctx context.Context, username, password, region string) ([]Endpoint, error) {
 	sum := md5.Sum([]byte(username))
 	device := hex.EncodeToString(sum[:])
 	base := []Parameter{{"app", "ahaspeed"}, {"lang", "zh_hans"}, {"device", device}, {"platform", "windows"}, {"version", "3.13.0"}}
 	signin, err := h.request(ctx, append(append([]Parameter{}, base...), Parameter{"cmd", "signin"}, Parameter{"name", username}, Parameter{"password", password}))
 	if err != nil {
-		return Endpoint{}, err
+		return nil, err
 	}
 	session := field(signin["token"], "token")
 	uid := field(signin["user"], "uid")
 	if session == "" || uid == "" {
-		return Endpoint{}, fmt.Errorf("aha: signin did not provide session and UID")
+		return nil, fmt.Errorf("aha: signin did not provide session and UID")
 	}
 	if d := field(signin["token"], "device"); d != "" {
 		device = d
@@ -148,19 +160,21 @@ func (h *HubDiscovery) Discover(ctx context.Context, username, password, region 
 	authenticated := append(append([]Parameter{}, base...), Parameter{"token", session})
 	access, err := h.request(ctx, append(append([]Parameter{}, authenticated...), Parameter{"cmd", "access"}))
 	if err != nil {
-		return Endpoint{}, err
+		return nil, err
 	}
 	token := accessToken(access)
 	// Trust only the access response as the source. The service may return the
 	// same value for signin and access; equality does not invalidate access.
 	if token == "" {
-		return Endpoint{}, fmt.Errorf("aha: access response lacks explicitly labelled persistent token; refusing signin fallback")
+		return nil, fmt.Errorf("aha: access response lacks explicitly labelled persistent token; refusing signin fallback")
 	}
 	nodes, err := h.request(ctx, append(append([]Parameter{}, authenticated...), Parameter{"cmd", "node"}))
 	if err != nil {
-		return Endpoint{}, err
+		return nil, err
 	}
 	root, _ := nodes["node"].(map[string]any)
+	endpoints := make([]Endpoint, 0)
+	seen := make(map[string]struct{})
 	for _, tier := range []string{"vip", "regular", "free", "free_signup"} {
 		regions, _ := root[tier].(map[string]any)
 		keys := make([]string, 0, len(regions))
@@ -196,10 +210,18 @@ func (h *HubDiscovery) Discover(ctx context.Context, username, password, region 
 					}
 					port = uint16(number)
 				}
-				endpoint := Endpoint{Backend: backend, Port: port, Handshake: HandshakeOptions{Host: host, UID: uid, AccessToken: token, Device: device, Platform: "windows", Version: "3.13.0", TunnelIP: "10.10.10.2", TunnelGateway: "10.10.10.250"}}
-				return endpoint, endpoint.Handshake.Validate()
+				endpoint := Endpoint{Backend: backend, Port: port, Node: name, Handshake: HandshakeOptions{Host: host, UID: uid, AccessToken: token, Device: device, Platform: "windows", Version: "3.13.0", TunnelIP: "10.10.10.2", TunnelGateway: "10.10.10.250"}}
+				key := endpoint.Backend + ":" + strconv.FormatUint(uint64(endpoint.Port), 10)
+				if _, loaded := seen[key]; loaded {
+					continue
+				}
+				if err := endpoint.Handshake.Validate(); err != nil {
+					continue
+				}
+				seen[key] = struct{}{}
+				endpoints = append(endpoints, endpoint)
 			}
 		}
 	}
-	return Endpoint{}, fmt.Errorf("aha: no node matching region")
+	return endpoints, nil
 }

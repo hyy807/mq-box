@@ -32,6 +32,7 @@ type Outbound struct {
 	ctx       context.Context
 	logger    log.ContextLogger
 	options   option.AHAOutboundOptions
+	node      string
 	discovery T.Discovery
 	dialer    N.Dialer
 }
@@ -48,13 +49,33 @@ func newTunnel(ctx context.Context, logger log.ContextLogger, tag string, o opti
 	if discovery == nil {
 		discovery = &T.HubDiscovery{Dialer: d}
 	}
-	return &Outbound{Adapter: outbound.NewAdapterWithDialerOptions(C.TypeAHA, tag, []string{N.NetworkTCP}, o.DialerOptions), ctx: ctx, logger: logger, options: o, discovery: discovery, dialer: d}, nil
+	return &Outbound{Adapter: outbound.NewAdapterWithDialerOptions(C.TypeAHA, tag, []string{N.NetworkTCP}, o.DialerOptions), ctx: ctx, logger: logger, options: o, node: o.Node, discovery: discovery, dialer: d}, nil
 }
 
 // DialTunnel discovers account-specific credentials and opens the raw IPv4
 // data plane. Never return this directly as an application TCP stream.
 func (h *Outbound) dialTunnel(ctx context.Context) (net.Conn, T.Endpoint, error) {
-	endpoint, err := h.discovery.Discover(ctx, h.options.Username, h.options.Password, h.options.Region)
+	var endpoint T.Endpoint
+	var err error
+	if h.node != "" {
+		multi, ok := h.discovery.(T.MultiDiscovery)
+		if !ok {
+			return nil, T.Endpoint{}, fmt.Errorf("aha: node selection requires multi-node discovery")
+		}
+		var endpoints []T.Endpoint
+		endpoints, err = multi.DiscoverAll(ctx, h.options.Username, h.options.Password, h.options.Region)
+		for _, candidate := range endpoints {
+			if candidate.Node == h.node || candidate.Backend == h.node {
+				endpoint = candidate
+				break
+			}
+		}
+		if endpoint.Backend == "" && err == nil {
+			err = fmt.Errorf("aha: discovered node %q not found", h.node)
+		}
+	} else {
+		endpoint, err = h.discovery.Discover(ctx, h.options.Username, h.options.Password, h.options.Region)
+	}
 	if err != nil {
 		return nil, T.Endpoint{}, fmt.Errorf("aha: account discovery failed: %w", err)
 	}

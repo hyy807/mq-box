@@ -12,9 +12,18 @@ type Discovery interface {
 	Discover(ctx context.Context, username, password, region string) (Endpoint, error)
 }
 
+// MultiDiscovery optionally exposes every usable account node. The legacy
+// Discovery method remains the single-node compatibility path used by the
+// existing endpoint startup code.
+type MultiDiscovery interface {
+	Discovery
+	DiscoverAll(ctx context.Context, username, password, region string) ([]Endpoint, error)
+}
+
 type Endpoint struct {
 	Backend   string
 	Port      uint16
+	Node      string
 	Handshake HandshakeOptions
 }
 

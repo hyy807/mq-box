@@ -11,6 +11,7 @@ type AHAEndpointOptions struct {
 	Username string `json:"username,omitempty"`
 	Password string `json:"password,omitempty"`
 	Region   string `json:"region,omitempty"`
+	Node     string `json:"node,omitempty"`
 }
 
 // AHAOutboundOptions is retained for source compatibility only; AHA is an L3
