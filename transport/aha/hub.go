@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	M "github.com/sagernet/sing/common/metadata"
@@ -27,10 +28,12 @@ type HubDiscovery struct {
 	BaseURL string
 }
 
+const defaultHubURL = "https://h.ahahub.net/light/dispatch/v2"
+
 func (h *HubDiscovery) request(ctx context.Context, p []Parameter) (map[string]any, error) {
 	endpoint := h.BaseURL
 	if endpoint == "" {
-		endpoint = "https://h.ahahub.net/light/dispatch/v2"
+		endpoint = defaultHubURL
 	}
 	p = append(p, Parameter{"timestamp", strconv.FormatInt(time.Now().UnixMilli(), 10)})
 	target := endpoint + "?" + EncodeParameters(p) + "&sign=" + SignControl("/light/dispatch/v2", p)
@@ -139,8 +142,127 @@ func (h *HubDiscovery) Discover(ctx context.Context, username, password, region 
 	return endpoints[0], nil
 }
 
+// One account may carry many endpoints, and they all start at once. Every login
+// allocates a session token and invalidates the previous one, so parallel
+// discoveries make each other fail ("access response lacks ... token") and can
+// drop every endpoint at once. A single-flight, short-lived cache keeps one
+// login per region while every caller still receives its own tunnel address.
+const discoveryCacheTTL = 3 * time.Minute
+
+type discoveryEntry struct {
+	mu        sync.Mutex
+	endpoints []Endpoint
+	expires   time.Time
+}
+
+var discoveryCache sync.Map
+
+type credentialsEntry struct {
+	mu          sync.Mutex
+	credentials Session
+	expires     time.Time
+}
+
+var credentialsCache sync.Map
+
+// credentialsTTL is how long one account login serves every endpoint. The peer
+// invalidates the previous token on each new login, so reusing one session is
+// what keeps a multi-node profile stable.
+const credentialsTTL = 15 * time.Minute
+
+// Token returns the account session, logging in at most once per TTL even when
+// many endpoints ask at the same moment.
+func (h *HubDiscovery) Token(ctx context.Context, username, password string) (Session, error) {
+	hub := h.BaseURL
+	if hub == "" {
+		hub = defaultHubURL
+	}
+	key := hub + "\x00" + username + "\x00" + password
+	value, _ := credentialsCache.LoadOrStore(key, &credentialsEntry{})
+	entry, _ := value.(*credentialsEntry)
+	if entry == nil {
+		return h.login(ctx, username, password)
+	}
+	entry.mu.Lock()
+	defer entry.mu.Unlock()
+	if entry.credentials.Token != "" && time.Now().Before(entry.expires) {
+		return entry.credentials, nil
+	}
+	credentials, err := h.login(ctx, username, password)
+	if err != nil {
+		return Session{}, err
+	}
+	entry.credentials = credentials
+	entry.expires = time.Now().Add(credentialsTTL)
+	return credentials, nil
+}
+
+func (h *HubDiscovery) login(ctx context.Context, username, password string) (Session, error) {
+	sum := md5.Sum([]byte(username))
+	device := hex.EncodeToString(sum[:])
+	base := []Parameter{{"app", "ahaspeed"}, {"lang", "zh_hans"}, {"device", device}, {"platform", "windows"}, {"version", "3.13.0"}}
+	signin, err := h.request(ctx, append(append([]Parameter{}, base...), Parameter{"cmd", "signin"}, Parameter{"name", username}, Parameter{"password", password}))
+	if err != nil {
+		return Session{}, err
+	}
+	session := field(signin["token"], "token")
+	uid := field(signin["user"], "uid")
+	if session == "" || uid == "" {
+		return Session{}, fmt.Errorf("aha: signin did not provide session and UID")
+	}
+	if discovered := field(signin["token"], "device"); discovered != "" {
+		device = discovered
+		base[2].Value = discovered
+	}
+	access, err := h.request(ctx, append(append([]Parameter{}, base...), Parameter{"token", session}, Parameter{"cmd", "access"}))
+	if err != nil {
+		return Session{}, err
+	}
+	token := accessToken(access)
+	if token == "" {
+		return Session{}, fmt.Errorf("aha: access response lacks explicitly labelled persistent token; refusing signin fallback")
+	}
+	return Session{Token: token, UID: uid, Device: device}, nil
+}
+
+// freshTunnelAddresses copies the cached nodes and gives each caller its own
+// session address, because the peer refuses an address another session holds.
+func freshTunnelAddresses(endpoints []Endpoint) []Endpoint {
+	fresh := make([]Endpoint, len(endpoints))
+	copy(fresh, endpoints)
+	for i := range fresh {
+		fresh[i].Handshake.TunnelIP = RandomTunnelAddress()
+	}
+	return fresh
+}
+
 // DiscoverAll returns every usable node in the requested region.
 func (h *HubDiscovery) DiscoverAll(ctx context.Context, username, password, region string) ([]Endpoint, error) {
+	hub := h.BaseURL
+	if hub == "" {
+		hub = defaultHubURL
+	}
+	key := hub + "\x00" + username + "\x00" + password + "\x00" + region
+	value, _ := discoveryCache.LoadOrStore(key, &discoveryEntry{})
+	entry, _ := value.(*discoveryEntry)
+	if entry == nil {
+		return h.discoverAll(ctx, username, password, region)
+	}
+	entry.mu.Lock()
+	defer entry.mu.Unlock()
+	if len(entry.endpoints) > 0 && time.Now().Before(entry.expires) {
+		return freshTunnelAddresses(entry.endpoints), nil
+	}
+	endpoints, err := h.discoverAll(ctx, username, password, region)
+	if err != nil {
+		return nil, err
+	}
+	entry.endpoints = endpoints
+	entry.expires = time.Now().Add(discoveryCacheTTL)
+	return freshTunnelAddresses(endpoints), nil
+}
+
+func (h *HubDiscovery) discoverAll(ctx context.Context, username, password, region string) ([]Endpoint, error) {
 	sum := md5.Sum([]byte(username))
 	device := hex.EncodeToString(sum[:])
 	base := []Parameter{{"app", "ahaspeed"}, {"lang", "zh_hans"}, {"device", device}, {"platform", "windows"}, {"version", "3.13.0"}}

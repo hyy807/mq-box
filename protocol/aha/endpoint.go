@@ -26,6 +26,8 @@ import (
 const (
 	ahaReconnectInitialBackoff = time.Second
 	ahaReconnectMaxBackoff     = 15 * time.Second
+	// How long a flow waits for the tunnel to come up on demand.
+	ahaConnectWait = 10 * time.Second
 )
 
 func RegisterEndpoint(registry *endpoint.Registry) {
@@ -40,6 +42,11 @@ var (
 
 // Endpoint connects the core's Go IP stack and native TUN flow return path to
 // the raw IPv4 TLS stream. Application TCP/UDP bytes never enter TLS directly.
+//
+// The tunnel is opened on demand rather than at startup: a selector normally
+// uses one node, so dialling every configured endpoint would hold a session per
+// region, flood the account's login API and make the whole service fail whenever
+// one node is unavailable.
 type Endpoint struct {
 	endpoint.Adapter
 	ctx      context.Context
@@ -57,6 +64,10 @@ type Endpoint struct {
 	conn     net.Conn
 	framer   *T.Framer
 	done     chan struct{}
+
+	readerStarted atomic.Bool
+	connectMu     sync.Mutex
+	connecting    chan struct{}
 }
 
 func NewEndpoint(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.AHAEndpointOptions) (adapter.Endpoint, error) {
@@ -77,15 +88,13 @@ func (e *Endpoint) Start(stage adapter.StartStage, scope *adapter.Scope) error {
 	if stage != adapter.StartStateStart {
 		return nil
 	}
-	conn, discovered, err := e.tunnel.dialTunnel(scope.Context())
-	if err != nil {
-		return err
-	}
 	e.stop = make(chan struct{})
-	e.storeConn(conn)
 	e.done = make(chan struct{})
 	scope.Add(func() error { return e.shutdown() })
-	e.address = netip.MustParseAddr(discovered.Handshake.TunnelIP)
+	// The address is chosen up front and offered during the handshake, so the TUN
+	// address the peer NATs to is known before the first connection exists.
+	e.address = netip.MustParseAddr(T.RandomTunnelAddress())
+	e.tunnel.preferredAddress = e.address.String()
 	options := device.Options{Context: scope.Context(), Logger: e.logger, Handler: e, MTU: 1500, UDPTimeout: C.UDPTimeout, ICMPTimeout: C.ICMPTimeout, Configuration: e.configuration(e.address)}
 	if manager := service.FromContext[adapter.NetworkManager](e.ctx); manager != nil {
 		options.InterfaceFinder = manager.InterfaceFinder()
@@ -102,9 +111,13 @@ func (e *Endpoint) Start(stage adapter.StartStage, scope *adapter.Scope) error {
 		e.shutdown()
 		return err
 	}
-	scope.Add(func() error { e.shutdown(); <-e.done; return d.Close() })
-	e.ready.Store(true)
-	go e.readLoop()
+	scope.Add(func() error {
+		e.shutdown()
+		if e.readerStarted.Load() {
+			<-e.done
+		}
+		return d.Close()
+	})
 	return nil
 }
 
@@ -146,6 +159,81 @@ func (e *Endpoint) shutdown() error {
 	})
 	e.closeConn()
 	return nil
+}
+
+// connectAsync opens the tunnel once, regardless of how many flows ask for it.
+func (e *Endpoint) connectAsync() {
+	e.connectMu.Lock()
+	if e.connecting != nil {
+		e.connectMu.Unlock()
+		return
+	}
+	wait := make(chan struct{})
+	e.connecting = wait
+	e.connectMu.Unlock()
+	go func() {
+		defer close(wait)
+		if _, _, err := e.connect(); err != nil {
+			e.logger.Debug("aha: connecting the tunnel failed: ", err)
+		}
+		e.connectMu.Lock()
+		e.connecting = nil
+		e.connectMu.Unlock()
+	}()
+}
+
+func (e *Endpoint) ensureConnected(ctx context.Context) error {
+	if e.ready.Load() {
+		return nil
+	}
+	if e.closed.Load() {
+		return fmt.Errorf("aha: endpoint is closed")
+	}
+	e.connectAsync()
+	e.connectMu.Lock()
+	wait := e.connecting
+	e.connectMu.Unlock()
+	if wait != nil {
+		waitCtx, cancel := context.WithTimeout(ctx, ahaConnectWait)
+		defer cancel()
+		select {
+		case <-wait:
+		case <-waitCtx.Done():
+		case <-e.stop:
+			return fmt.Errorf("aha: endpoint is closed")
+		}
+	}
+	if e.ready.Load() {
+		return nil
+	}
+	return fmt.Errorf("aha: endpoint is not connected")
+}
+
+// connect performs one handshake and adopts the address the peer accepted.
+func (e *Endpoint) connect() (net.Conn, T.Endpoint, error) {
+	if e.closed.Load() {
+		return nil, T.Endpoint{}, fmt.Errorf("aha: endpoint is closed")
+	}
+	conn, discovered, err := e.tunnel.dialTunnel(e.ctx)
+	if err != nil {
+		return nil, T.Endpoint{}, err
+	}
+	address := netip.MustParseAddr(discovered.Handshake.TunnelIP)
+	e.storeConn(conn)
+	if address != e.address {
+		e.address = address
+		if e.device != nil {
+			if err = e.device.UpdateConfiguration(e.configuration(address)); err != nil {
+				e.logger.Warn("aha: updating the tunnel address failed: ", err)
+			}
+		}
+	}
+	e.tunnel.preferredAddress = address.String()
+	e.ready.Store(true)
+	if e.readerStarted.CompareAndSwap(false, true) {
+		go e.readLoop()
+	}
+	return conn, discovered, nil
 }
 
 func (e *Endpoint) readLoop() {
@@ -190,25 +278,13 @@ func (e *Endpoint) reconnect() bool {
 		if e.closed.Load() {
 			return false
 		}
-		conn, discovered, err := e.tunnel.dialTunnel(e.ctx)
-		if err != nil {
+		if _, _, err := e.connect(); err != nil {
 			e.logger.Warn("aha: reconnecting: ", err)
 			if backoff < ahaReconnectMaxBackoff {
 				backoff *= 2
 			}
 			continue
 		}
-		e.storeConn(conn)
-		address := netip.MustParseAddr(discovered.Handshake.TunnelIP)
-		if address != e.address {
-			e.address = address
-			if e.device != nil {
-				if err = e.device.UpdateConfiguration(e.configuration(address)); err != nil {
-					e.logger.Warn("aha: updating the tunnel address failed: ", err)
-				}
-			}
-		}
-		e.ready.Store(true)
 		e.logger.Info("aha: tunnel re-established")
 		return true
 	}
@@ -225,6 +301,9 @@ func (e *Endpoint) writeBuffers(buffers []*buf.Buffer) error {
 
 func (e *Endpoint) WritePackets(packets [][]byte) error {
 	if !e.ready.Load() {
+		// The read side is what opens the tunnel, so a first inbound packet both
+		// reports the transient state and starts the connection.
+		e.connectAsync()
 		return fmt.Errorf("aha: endpoint is not connected")
 	}
 	framer := e.currentFramer()
@@ -287,9 +366,6 @@ func (e *Endpoint) NewDNSPacket(payload []byte, source, destination M.Socksaddr,
 }
 
 func (e *Endpoint) ipv4Destination(ctx context.Context, destination M.Socksaddr) (M.Socksaddr, error) {
-	if !e.ready.Load() {
-		return M.Socksaddr{}, fmt.Errorf("aha: endpoint is not connected")
-	}
 	if destination.IsDomain() {
 		if e.dns == nil {
 			return M.Socksaddr{}, fmt.Errorf("aha: DNS router unavailable")
@@ -329,6 +405,9 @@ func (e *Endpoint) DialContext(ctx context.Context, network string, destination 
 	if e.device == nil {
 		return nil, fmt.Errorf("aha: device not started")
 	}
+	if err := e.ensureConnected(ctx); err != nil {
+		return nil, err
+	}
 	resolved, err := e.ipv4Destination(ctx, destination)
 	if err != nil {
 		return nil, err
@@ -339,6 +418,9 @@ func (e *Endpoint) DialContext(ctx context.Context, network string, destination 
 func (e *Endpoint) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
 	if e.device == nil {
 		return nil, fmt.Errorf("aha: device not started")
+	}
+	if err := e.ensureConnected(ctx); err != nil {
+		return nil, err
 	}
 	resolved, err := e.ipv4Destination(ctx, destination)
 	if err != nil {

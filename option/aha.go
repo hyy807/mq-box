@@ -12,6 +12,11 @@ type AHAEndpointOptions struct {
 	Password string `json:"password,omitempty"`
 	Region   string `json:"region,omitempty"`
 	Node     string `json:"node,omitempty"`
+	// Plaintext node: when both are set the core dials this entry directly and
+	// never calls the node API (only the account login remains).
+	Backend string `json:"backend,omitempty"`
+	Host    string `json:"host,omitempty"`
+	Port    uint16 `json:"port,omitempty"`
 }
 
 // AHAOutboundOptions is retained for source compatibility only; AHA is an L3

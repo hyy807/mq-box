@@ -80,6 +80,9 @@ type Outbound struct {
 	node      string
 	discovery T.Discovery
 	dialer    N.Dialer
+	// preferredAddress is the tunnel address the caller already bound to its TUN
+	// device; using it first keeps the device address valid without reconfiguring.
+	preferredAddress string
 }
 
 func newTunnel(ctx context.Context, logger log.ContextLogger, tag string, o option.AHAEndpointOptions) (*Outbound, error) {
@@ -101,6 +104,48 @@ func newTunnel(ctx context.Context, logger log.ContextLogger, tag string, o opti
 // every sibling in the same region remains a fallback: individual entries go stale
 // or become unreachable independently.
 func (h *Outbound) candidates(ctx context.Context) ([]T.Endpoint, error) {
+	// A plaintext node needs no discovery at all: the profile already carries the
+	// entry to dial and its camouflage identity. Only the account session is
+	// fetched, once per account for every endpoint.
+	if h.options.Backend != "" {
+		if h.options.Host == "" {
+			return nil, fmt.Errorf("aha: a plaintext node needs host and backend")
+		}
+		credentials, err := h.accountToken(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("aha: account discovery failed: %w", err)
+		}
+		port := h.options.Port
+		if port == 0 {
+			port = 3306
+		}
+		return []T.Endpoint{{
+			Backend: h.options.Backend,
+			Port:    port,
+			Node:    h.options.Backend,
+			Handshake: T.HandshakeOptions{
+				Host: h.options.Host, UID: credentials.UID, AccessToken: credentials.Token,
+				Device: credentials.Device, Platform: "windows", Version: "3.13.0",
+				TunnelIP: T.RandomTunnelAddress(), TunnelGateway: T.TunnelGateway,
+			},
+		}}, nil
+	}
+	return h.discoveredCandidates(ctx)
+}
+
+// accountToken returns the account session from whatever discovery was injected.
+func (h *Outbound) accountToken(ctx context.Context) (T.Session, error) {
+	if source, ok := h.discovery.(T.TokenSource); ok {
+		return source.Token(ctx, h.options.Username, h.options.Password)
+	}
+	endpoint, err := h.discovery.Discover(ctx, h.options.Username, h.options.Password, h.options.Region)
+	if err != nil {
+		return T.Session{}, err
+	}
+	return T.Session{Token: endpoint.Handshake.AccessToken, UID: endpoint.Handshake.UID, Device: endpoint.Handshake.Device}, nil
+}
+
+func (h *Outbound) discoveredCandidates(ctx context.Context) ([]T.Endpoint, error) {
 	multi, multiOK := h.discovery.(T.MultiDiscovery)
 	if h.node == "" {
 		if multiOK {
@@ -177,7 +222,11 @@ func (h *Outbound) dialTunnel(ctx context.Context) (net.Conn, T.Endpoint, error)
 		for _, port := range ports {
 			// The advertised tunnel address may already be held by another session;
 			// the server then refuses the handshake, so a fresh address is offered.
-			plan = append(plan, ahaAttempt{endpoint, port, T.RandomTunnelAddress()})
+			address := T.RandomTunnelAddress()
+			if len(plan) == 0 && h.preferredAddress != "" {
+				address = h.preferredAddress
+			}
+			plan = append(plan, ahaAttempt{endpoint, port, address})
 		}
 	}
 	if len(plan) == 0 {

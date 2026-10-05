@@ -27,6 +27,20 @@ type Endpoint struct {
 	Handshake HandshakeOptions
 }
 
+// Session is the account's persistent data-plane token. It is the only thing
+// that cannot be written into a profile as plaintext.
+type Session struct {
+	Token  string
+	UID    string
+	Device string
+}
+
+// TokenSource obtains the account session without fetching the node table, so a
+// profile that carries its nodes in plaintext needs one login for the whole run.
+type TokenSource interface {
+	Token(ctx context.Context, username, password string) (Session, error)
+}
+
 type discoveryKey struct{}
 
 func WithDiscovery(ctx context.Context, client Discovery) context.Context {
