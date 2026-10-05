@@ -30,14 +30,10 @@ func TestPlaintextNodeNeedsNoNodeLookup(t *testing.T) {
 			Platform: "windows", Version: "3.13.0", TunnelIP: "10.10.10.9", TunnelGateway: T.TunnelGateway,
 		},
 	}}
-	outbound, err := newTunnel(context.Background(), nil, "test", option.AHAEndpointOptions{
-		Username: "u", Password: "p",
-		Backend: "dubai1.wishadmin.com", Host: "dubai1.baidu.com", Port: 3306,
-	})
-	if err != nil {
-		t.Fatal(err)
+	outbound := &Outbound{
+		options:   option.AHAOutboundOptions{Username: "u", Password: "p", Backend: "dubai1.wishadmin.com", Host: "dubai1.baidu.com", Port: 3306},
+		discovery: discovery,
 	}
-	outbound.discovery = discovery
 	candidates, err := outbound.candidates(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -55,17 +51,17 @@ func TestPlaintextNodeNeedsNoNodeLookup(t *testing.T) {
 	if endpoint.Handshake.AccessToken != "token" || endpoint.Handshake.UID != "u" {
 		t.Fatalf("account session not applied: %+v", endpoint.Handshake)
 	}
+	if discovery.region != "" {
+		t.Fatalf("a plaintext node must not ask for a region, got %q", discovery.region)
+	}
 }
 
-func TestPlaintextNodeRequiresBothFields(t *testing.T) {
-	outbound, err := newTunnel(context.Background(), nil, "test", option.AHAEndpointOptions{
-		Username: "u", Password: "p", Backend: "dubai1.wishadmin.com",
-	})
-	if err != nil {
-		t.Fatal(err)
+func TestPlaintextNodeRequiresItsCamouflageHost(t *testing.T) {
+	outbound := &Outbound{
+		options:   option.AHAOutboundOptions{Username: "u", Password: "p", Backend: "dubai1.wishadmin.com"},
+		discovery: &stubDiscovery{},
 	}
-	outbound.discovery = &stubDiscovery{}
-	if _, err = outbound.candidates(context.Background()); err == nil {
+	if _, err := outbound.candidates(context.Background()); err == nil {
 		t.Fatal("a plaintext node without its camouflage host must be rejected")
 	}
 }
