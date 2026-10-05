@@ -71,16 +71,19 @@ func (h *Outbound) dialTunnel(ctx context.Context) (net.Conn, T.Endpoint, error)
 	if h.options.TLS != nil {
 		tlsOptions = *h.options.TLS
 	}
-	if !tlsOptions.Enabled || tlsOptions.DisableSNI || (tlsOptions.ServerName != "" && tlsOptions.ServerName != endpoint.Handshake.Host) {
-		return nil, T.Endpoint{}, fmt.Errorf("aha: requires TLS SNI matching discovered camouflage host")
+	if !tlsOptions.Enabled || tlsOptions.DisableSNI || (tlsOptions.ServerName != "" && tlsOptions.ServerName != endpoint.Backend) {
+		return nil, T.Endpoint{}, fmt.Errorf("aha: requires TLS SNI matching discovered backend host")
 	}
 	for _, alpn := range tlsOptions.ALPN {
 		if alpn != "http/1.1" {
 			return nil, T.Endpoint{}, fmt.Errorf("aha: only HTTP/1.1 ALPN is supported")
 		}
 	}
-	tlsOptions.ServerName = endpoint.Handshake.Host
-	config, err := tls.NewClient(h.ctx, h.logger, endpoint.Handshake.Host, tlsOptions)
+	// The API's host is the camouflage/HTTP Host value (for example
+	// dubai1.baidu.com). The discovered backend is the TLS virtual host and
+	// certificate identity (for example dubai1.wishadmin.com).
+	tlsOptions.ServerName = endpoint.Backend
+	config, err := tls.NewClient(h.ctx, h.logger, endpoint.Backend, tlsOptions)
 	if err != nil {
 		return nil, T.Endpoint{}, err
 	}

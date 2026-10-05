@@ -92,3 +92,9 @@ func TestRejectMissingOrInjectedCredentials(t *testing.T) {
 		t.Fatal("header injection accepted")
 	}
 }
+
+func TestBackendHostPreservesCamouflageMapping(t *testing.T) {
+	if got := BackendHost("dubai1.baidu.com"); got != "dubai1.wishadmin.com" {
+		t.Fatalf("got %q", got)
+	}
+}
