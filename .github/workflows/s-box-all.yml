@@ -18,6 +18,13 @@ jobs:
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Tag so git describe works
+        shell: bash
+        run: |
+          git tag -f v1.15.0-alpha.10
+          git describe --tags
       - name: Check out desktop client
         shell: bash
         run: |
