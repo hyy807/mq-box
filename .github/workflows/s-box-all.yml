@@ -75,6 +75,8 @@ jobs:
         run: |
           export PATH="$PATH:$(go env GOPATH)/bin"
           go run ./cmd/internal/build_libbox -target apple -platform macos
+          rm -rf clients/apple/Libbox.xcframework
+          mv Libbox.xcframework clients/apple/
       - name: Archive macOS app (unsigned)
         run: |
           cd clients/apple
