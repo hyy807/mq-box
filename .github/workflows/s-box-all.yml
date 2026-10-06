@@ -4,9 +4,6 @@ name: s-box all platforms (unsigned)
 # 全部不签名，产物直接作为 artifact 上传（公开仓库 Actions 免费不限量）
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - master
 
 permissions:
   contents: write
