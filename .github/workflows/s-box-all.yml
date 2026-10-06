@@ -46,6 +46,17 @@ jobs:
           node-version-file: clients/desktop/package.json
           cache: pnpm
           cache-dependency-path: clients/desktop/pnpm-lock.yaml
+      - name: Self-signed signing certificate
+        shell: pwsh
+        run: |
+          $plain = [System.Guid]::NewGuid().ToString("N")
+          $secure = ConvertTo-SecureString -String $plain -Force -AsPlainText
+          $cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject "CN=s-box CI" -CertStoreLocation Cert:\CurrentUser\My -NotAfter (Get-Date).AddYears(3)
+          $pfx = Join-Path $env:RUNNER_TEMP "s-box-ci.p12"
+          Export-PfxCertificate -Cert $cert -FilePath $pfx -Password $secure | Out-Null
+          @{ windows = @{ certificateFile = $pfx; certificatePassword = $plain } } | ConvertTo-Json -Depth 3 | Set-Content -Encoding utf8NoBOM clients/desktop/signing.local.json
+          Get-Content clients/desktop/signing.local.json
+          Test-Path $pfx
       - name: Install dependencies
         run: pnpm -C clients/desktop install
       - name: Package NSIS installer
