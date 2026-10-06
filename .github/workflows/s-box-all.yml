@@ -71,7 +71,9 @@ jobs:
           go install github.com/sagernet/gomobile/cmd/gobind
           "$(go env GOPATH)/bin/gomobile" init
       - name: Build apple libbox
-        run: go run ./cmd/internal/build_libbox -target apple -platform apple/macos
+        run: |
+          export PATH="$PATH:$(go env GOPATH)/bin"
+          go run ./cmd/internal/build_libbox -target apple -platform macos
       - name: Archive macOS app (unsigned)
         run: |
           cd clients/apple
@@ -123,7 +125,9 @@ jobs:
           go install github.com/sagernet/gomobile/cmd/gobind
           "$(go env GOPATH)/bin/gomobile" init
       - name: Build apple libbox
-        run: go run ./cmd/internal/build_libbox -target apple -platform apple/ios
+        run: |
+          export PATH="$PATH:$(go env GOPATH)/bin"
+          go run ./cmd/internal/build_libbox -target apple -platform ios
       - name: Archive iOS app (unsigned)
         run: |
           cd clients/apple
