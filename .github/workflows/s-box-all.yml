@@ -51,6 +51,7 @@ jobs:
           cd clients/apple
           git fetch --depth 1 origin e1bc3629ee78fa824176c6be157ee2be7795c5c0
           git checkout -q FETCH_HEAD
+          git submodule update --init --recursive --depth 1
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
@@ -110,6 +111,7 @@ jobs:
           cd clients/apple
           git fetch --depth 1 origin e1bc3629ee78fa824176c6be157ee2be7795c5c0
           git checkout -q FETCH_HEAD
+          git submodule update --init --recursive --depth 1
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
@@ -227,10 +229,10 @@ jobs:
       - name: Merge AARs into the client
         run: |
           ls -R libbox-inputs | head -20
-          go run ./cmd/internal/merge_aar -output clients/android/app/libs/libbox.aar libbox-inputs/*/libbox.aar || \
-            cp libbox-inputs/arm64/libbox.aar clients/android/app/libs/libbox.aar
-          go run ./cmd/internal/merge_aar -output clients/android/app/libs/libbox-legacy.aar libbox-inputs/*/libbox-legacy.aar || \
-            cp libbox-inputs/arm64/libbox-legacy.aar clients/android/app/libs/libbox-legacy.aar
+          mkdir -p clients/android/app/libs
+          go run ./cmd/internal/merge_aar -output clients/android/app/libs/libbox.aar libbox-inputs/*/*/libbox.aar
+          go run ./cmd/internal/merge_aar -output clients/android/app/libs/libbox-legacy.aar libbox-inputs/*/*/libbox-legacy.aar
+          ls -l clients/android/app/libs
       - name: Build unsigned APK
         working-directory: clients/android
         env:
