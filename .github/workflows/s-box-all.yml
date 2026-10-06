@@ -46,8 +46,11 @@ jobs:
           submodules: false
       - name: Check out apple client
         run: |
-          git submodule update --init clients/apple
-          git -C clients/apple checkout -q e1bc3629ee78fa824176c6be157ee2be7795c5c0 || true
+          rm -rf clients/apple
+          git clone --filter=blob:none --no-checkout https://github.com/SagerNet/sing-box-for-apple.git clients/apple
+          cd clients/apple
+          git fetch --depth 1 origin e1bc3629ee78fa824176c6be157ee2be7795c5c0
+          git checkout -q FETCH_HEAD
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
@@ -100,8 +103,11 @@ jobs:
           submodules: false
       - name: Check out apple client
         run: |
-          git submodule update --init clients/apple
-          git -C clients/apple checkout -q e1bc3629ee78fa824176c6be157ee2be7795c5c0 || true
+          rm -rf clients/apple
+          git clone --filter=blob:none --no-checkout https://github.com/SagerNet/sing-box-for-apple.git clients/apple
+          cd clients/apple
+          git fetch --depth 1 origin e1bc3629ee78fa824176c6be157ee2be7795c5c0
+          git checkout -q FETCH_HEAD
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
@@ -195,7 +201,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Check out android client
-        run: git submodule update --init clients/android
+        run: |
+          rm -rf clients/android
+          git clone --depth 1 --branch dev https://github.com/SagerNet/sing-box-for-android.git clients/android
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
