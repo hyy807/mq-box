@@ -12,6 +12,50 @@ permissions:
   contents: write
 
 jobs:
+  windows-client:
+    name: Windows 安装包 (x64)
+    runs-on: windows-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check out desktop client
+        run: |
+          rm -rf clients/desktop
+          git clone --depth 1 --branch dev https://github.com/SagerNet/sing-box-for-desktop.git clients/desktop
+          git -C clients/desktop submodule update --init --recursive
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: dtolnay/rust-toolchain@1.88.0
+        with:
+          targets: x86_64-pc-windows-msvc
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: clients/desktop/package.json
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: clients/desktop/package.json
+          cache: pnpm
+          cache-dependency-path: clients/desktop/pnpm-lock.yaml
+      - name: Install dependencies
+        run: pnpm -C clients/desktop install
+      - name: Package NSIS installer
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: pnpm -C clients/desktop package:win -- x64
+      - name: Collect installer
+        shell: pwsh
+        run: |
+          Get-ChildItem clients/desktop/release | Select-Object Name,Length | Format-Table
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item clients/desktop/release/SFW-*.exe dist
+          Get-ChildItem dist | Select-Object Name,Length
+      - uses: actions/upload-artifact@v4
+        with:
+          name: s-box-windows-installer
+          path: dist
+
   windows:
     name: Windows CLI
     runs-on: windows-latest
