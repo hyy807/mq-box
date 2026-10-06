@@ -19,6 +19,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Check out desktop client
+        shell: bash
         run: |
           rm -rf clients/desktop
           git clone --depth 1 --branch dev https://github.com/SagerNet/sing-box-for-desktop.git clients/desktop
