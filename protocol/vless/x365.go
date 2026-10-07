@@ -75,6 +75,10 @@ func (c *x365Conn) readResponse() error {
 	if string(response[:4]) != "X365" {
 		return E.New("invalid x365 response header: prefix_hex=", hex.EncodeToString(response[:]))
 	}
+	// 参考实现：第 5 字节是服务端状态，0 才算握手成功。
+	if response[4] != 0 {
+		return E.New("x365 rejected by server, status=", response[4])
+	}
 	c.responseRead = true
 	return nil
 }

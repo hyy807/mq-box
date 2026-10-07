@@ -12,13 +12,14 @@ import (
 )
 
 type _V2RayTransportOptions struct {
-	Type               string                  `json:"type" enum:"http,ws,quic,grpc,httpupgrade,xhttp"`
+	Type               string                  `json:"type" enum:"http,ws,quic,grpc,httpupgrade,xhttp,x365"`
 	HTTPOptions        V2RayHTTPOptions        `json:"-"`
 	WebsocketOptions   V2RayWebsocketOptions   `json:"-"`
 	QUICOptions        V2RayQUICOptions        `json:"-"`
 	GRPCOptions        V2RayGRPCOptions        `json:"-"`
 	HTTPUpgradeOptions V2RayHTTPUpgradeOptions `json:"-"`
 	XHTTPOptions       V2RayXHTTPOptions       `json:"-"`
+	X365Options        V2RayX365Options        `json:"-"`
 }
 
 type V2RayTransportOptions _V2RayTransportOptions
@@ -38,6 +39,8 @@ func (o V2RayTransportOptions) MarshalJSON() ([]byte, error) {
 		v = o.HTTPUpgradeOptions
 	case C.V2RayTransportTypeXHTTP:
 		v = o.XHTTPOptions
+	case C.V2RayTransportTypeX365:
+		v = o.X365Options
 	case "":
 		return nil, E.New("missing transport type")
 	default:
@@ -65,6 +68,8 @@ func (o *V2RayTransportOptions) UnmarshalJSON(bytes []byte) error {
 		v = &o.HTTPUpgradeOptions
 	case C.V2RayTransportTypeXHTTP:
 		v = &o.XHTTPOptions
+	case C.V2RayTransportTypeX365:
+		v = &o.X365Options
 	default:
 		return E.New("unknown transport type: " + o.Type)
 	}
@@ -84,6 +89,7 @@ func (o V2RayTransportOptions) DescribeSchema(builder schema.Builder) (*schema.N
 			{Value: C.V2RayTransportTypeGRPC, StructType: reflect.TypeFor[V2RayGRPCOptions]()},
 			{Value: C.V2RayTransportTypeHTTPUpgrade, StructType: reflect.TypeFor[V2RayHTTPUpgradeOptions]()},
 			{Value: C.V2RayTransportTypeXHTTP, StructType: reflect.TypeFor[V2RayXHTTPOptions]()},
+			{Value: C.V2RayTransportTypeX365, StructType: reflect.TypeFor[V2RayX365Options]()},
 		}, nil)
 	})
 }
@@ -115,6 +121,14 @@ type V2RayGRPCOptions struct {
 }
 
 type V2RayHTTPUpgradeOptions struct {
+	Host    string               `json:"host,omitempty"`
+	Path    string               `json:"path,omitempty"`
+	Headers badoption.HTTPHeader `json:"headers,omitempty"`
+}
+
+// V2RayX365Options configures the x365 client: HTTP/1.1 chunked stream over
+// REALITY, matching the reference implementation byte for byte.
+type V2RayX365Options struct {
 	Host    string               `json:"host,omitempty"`
 	Path    string               `json:"path,omitempty"`
 	Headers badoption.HTTPHeader `json:"headers,omitempty"`

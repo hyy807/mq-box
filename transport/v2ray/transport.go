@@ -11,6 +11,7 @@ import (
 	"github.com/sagernet/sing-box/transport/v2rayhttpupgrade"
 	"github.com/sagernet/sing-box/transport/v2raywebsocket"
 	"github.com/sagernet/sing-box/transport/v2rayxhttp"
+	"github.com/sagernet/sing-box/transport/x365http"
 	E "github.com/sagernet/sing/common/exceptions"
 	"github.com/sagernet/sing/common/logger"
 	M "github.com/sagernet/sing/common/metadata"
@@ -65,6 +66,8 @@ func NewClientTransport(ctx context.Context, dialer N.Dialer, serverAddr M.Socks
 		return v2rayhttpupgrade.NewClient(ctx, dialer, serverAddr, options.HTTPUpgradeOptions, tlsConfig)
 	case C.V2RayTransportTypeXHTTP:
 		return v2rayxhttp.NewClient(dialer, serverAddr, options.XHTTPOptions, tlsConfig)
+	case C.V2RayTransportTypeX365:
+		return x365http.NewClient(ctx, dialer, serverAddr, options.X365Options, tlsConfig)
 	default:
 		return nil, E.New("unknown transport type: " + options.Type)
 	}
