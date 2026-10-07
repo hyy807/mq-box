@@ -126,6 +126,11 @@ func ProxyDisplayName(proxyType string) string {
 	case TypeURLTest:
 		return "URLTest"
 	default:
+		if ModProxyDisplayName != nil { // mq-box
+			if name := ModProxyDisplayName(proxyType); name != "" {
+				return name
+			}
+		}
 		return "Unknown"
 	}
 }
