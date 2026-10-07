@@ -3,7 +3,6 @@ package vless
 import (
 	"context"
 	"net"
-	"strings"
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/outbound"
@@ -14,7 +13,6 @@ import (
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing-box/transport/v2ray"
-	"github.com/sagernet/sing-vmess"
 	"github.com/sagernet/sing-vmess/packetaddr"
 	"github.com/sagernet/sing-vmess/vless"
 	"github.com/sagernet/sing/common"
@@ -47,14 +45,9 @@ type Outbound struct {
 	transport       adapter.V2RayClientTransport
 	packetAddr      bool
 	xudp            bool
-	x365            bool
-	x365Key         [16]byte
 }
 
 func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.VLESSOutboundOptions) (adapter.Outbound, error) {
-	if len(options.X365Multipath) > 0 {
-		return newX365MultipathOutbound(ctx, router, logger, tag, options)
-	}
 	outboundDialer, err := dialer.New(ctx, options.DialerOptions, options.ServerIsDomain())
 	if err != nil {
 		return nil, err
@@ -99,18 +92,7 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 			return nil, E.New("unknown packet encoding: ", *options.PacketEncoding)
 		}
 	}
-	outbound.x365 = options.X365 || strings.HasSuffix(options.UUID, "#x365")
-	uuid := strings.TrimSuffix(options.UUID, "#x365")
-	if outbound.x365 {
-		if options.Flow != "" {
-			return nil, E.New("x365 does not support VLESS flow")
-		}
-		outbound.x365Key, err = x365UUID(uuid)
-		if err != nil {
-			return nil, err
-		}
-	}
-	outbound.client, err = vless.NewClient(uuid, options.Flow, logger)
+	outbound.client, err = vless.NewClient(options.UUID, options.Flow, logger)
 	if err != nil {
 		return nil, err
 	}
@@ -222,15 +204,9 @@ func (h *vlessDialer) DialContext(ctx context.Context, network string, destinati
 	switch N.NetworkName(network) {
 	case N.NetworkTCP:
 		h.logger.InfoContext(ctx, "outbound connection to ", destination)
-		if h.x365 {
-			return newX365Conn(conn, h.x365Key, vmess.CommandTCP, destination), nil
-		}
 		return h.client.DialEarlyConn(conn, destination)
 	case N.NetworkUDP:
 		h.logger.InfoContext(ctx, "outbound packet connection to ", destination)
-		if h.x365 {
-			return h.x365PacketConn(conn, destination)
-		}
 		if h.xudp {
 			return h.client.DialEarlyXUDPPacketConn(conn, destination)
 		} else if h.packetAddr {
@@ -267,14 +243,6 @@ func (h *vlessDialer) ListenPacket(ctx context.Context, destination M.Socksaddr)
 	if err != nil {
 		common.Close(conn)
 		return nil, err
-	}
-	if h.x365 {
-		packetConn, err := h.x365PacketConn(conn, destination)
-		if err != nil {
-			conn.Close()
-			return nil, err
-		}
-		return packetConn.(net.PacketConn), nil
 	}
 	if h.xudp {
 		return h.client.DialEarlyXUDPPacketConn(conn, destination)

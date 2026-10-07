@@ -21,7 +21,7 @@ jobs:
           cache: true
       - name: Protocol unit tests
         run: |
-          go test ./protocol/vless/ ./transport/x365http/ \
+          go test ./protocol/vless/ \
             ./transport/jumao/ ./protocol/jumao/ \
             ./transport/onesocks/ ./protocol/onesocks/ \
             ./transport/oppa/ ./protocol/oppa/ \
