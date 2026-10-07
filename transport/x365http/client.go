@@ -130,7 +130,13 @@ func (c *Conn) readHead() error {
 		return E.Cause(err, "read x365 response head")
 	}
 	if response.StatusCode != http.StatusOK {
-		return E.New("x365: unexpected status: ", response.Status)
+		var head strings.Builder
+		response.Header.Write(&head) //nolint:errcheck
+		detail := strings.Join(strings.Fields(head.String()), " ")
+		if len(detail) > 300 {
+			detail = detail[:300]
+		}
+		return E.New("x365: unexpected status: ", response.Status, " headers=", detail)
 	}
 	c.headRead = true
 	// http.Response.Body 已经内置 chunked 解码（含 trailer）。

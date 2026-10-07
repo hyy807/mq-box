@@ -290,10 +290,11 @@ jobs:
 
   android-apk:
     name: Android APK
-    needs: verify
+    needs:
+      - verify
+      - android-library
     runs-on: ubuntu-latest
     timeout-minutes: 90
-    needs: android-library
     steps:
       - uses: actions/checkout@v4
       - name: Check out android client
