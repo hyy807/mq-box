@@ -9,8 +9,29 @@ permissions:
   contents: write
 
 jobs:
+  verify:
+    name: Protocol tests (gate)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Protocol unit tests
+        run: |
+          go test ./protocol/vless/ ./transport/x365http/ \
+            ./transport/jumao/ ./protocol/jumao/ \
+            ./transport/onesocks/ ./protocol/onesocks/ \
+            ./transport/oppa/ ./protocol/oppa/ \
+            ./transport/aha/ ./protocol/aha/ \
+            ./transport/lightxtreme/ ./protocol/anytls/ \
+            ./transport/trojan/ ./protocol/trojan/ -count=1
+
   windows-client:
     name: Windows 安装包 (x64)
+    needs: verify
     runs-on: windows-latest
     timeout-minutes: 120
     steps:
@@ -74,6 +95,7 @@ jobs:
 
   windows:
     name: Windows CLI
+    needs: verify
     runs-on: windows-latest
     timeout-minutes: 60
     steps:
@@ -98,6 +120,7 @@ jobs:
 
   darwin:
     name: macOS CLI + app
+    needs: verify
     runs-on: macos-latest
     timeout-minutes: 90
     steps:
@@ -160,6 +183,7 @@ jobs:
 
   ios:
     name: iOS IPA (unsigned)
+    needs: verify
     runs-on: macos-latest
     timeout-minutes: 90
     steps:
@@ -227,6 +251,7 @@ jobs:
 
   android-library:
     name: Android libbox (${{ matrix.go_arch }})
+    needs: verify
     runs-on: ubuntu-latest
     timeout-minutes: 90
     strategy:
@@ -265,6 +290,7 @@ jobs:
 
   android-apk:
     name: Android APK
+    needs: verify
     runs-on: ubuntu-latest
     timeout-minutes: 90
     needs: android-library
