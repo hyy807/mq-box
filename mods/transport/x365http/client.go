@@ -1,13 +1,14 @@
 // Package x365http 实现 X365 协议的承载层：REALITY/TLS 之上的
 // HTTP/1.1 POST + Transfer-Encoding: chunked 流。
 //
-// 与官方参考实现（gox365）字节一致：
+// 与官方新实现（mihomo 2026-10 build 718223992b53，adapter/outbound.prepareX365XHTTPHeaders
+// + (*Vless).streamConnContext 反汇编）逐项核对一致：
 //
 //	POST <path> HTTP/1.1
 //	Host: <伪装域名>
 //	Content-Type: application/grpc
 //	Transfer-Encoding: chunked
-//	User-Agent: Mozilla/5.0
+//	User-Agent: <覆盖为完整 Chrome UA>
 //
 // 之后每个 Write 立即做成一个 chunk 发出（上层 X365 握手帧即第一个 chunk），
 // 服务端响应体同样是 chunked：首块 'X365' + 1B 状态（0 = 成功），其后是裸载荷。
@@ -16,6 +17,11 @@
 //   - 服务端 ALPN 恒为 http/1.1，别用 h2：XHTTP 的 h2 通道在这个部署上不通。
 //   - 必须 Transfer-Encoding: chunked；用 Content-Length 会被当一次性请求。
 //   - 每次 Write 立即成块，不能缓冲，否则数据滞留、隧道建好但 0 字节。
+//   - User-Agent 必须覆盖为 chrome UA：新版 x365 分支会先 delete 再 set
+//     `User-Agent`（streamConnContext 内 addHeader 路径，值长 0x6f=111 字节），
+//     不是默认 Go UA。伪装度不够会被中间层识别。
+//   - 语义上等价于 xhttp 的 mode=stream-one：单一 POST 长期复用，
+//     不做 packet-up/stream-up 的多请求上行。
 package x365http
 
 import (
@@ -35,6 +41,10 @@ import (
 )
 
 var _ adapter.V2RayClientTransport = (*Client)(nil)
+
+// userAgent 是 x365 分支强制覆盖的 User-Agent 值，取自新版实现的
+// 内联字符串常量（长度 0x6f = 111 字节，与 mihomo build 718223992b53 一致）。
+const userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
 type Client struct {
 	dialer     N.Dialer
@@ -99,7 +109,11 @@ func (c *Client) DialContext(ctx context.Context) (net.Conn, error) {
 	}
 	request.WriteString("Content-Type: application/grpc\r\n")
 	request.WriteString("Transfer-Encoding: chunked\r\n")
-	request.WriteString("User-Agent: Mozilla/5.0\r\n")
+	// 新版 x365 分支强制覆盖 User-Agent 为完整 chrome UA（不是 Go 默认值，
+	// 也不是简写的 Mozilla/5.0）。缺失会被识别为非浏览器流量。
+	request.WriteString("User-Agent: ")
+	request.WriteString(userAgent)
+	request.WriteString("\r\n")
 	request.WriteString("\r\n")
 	if _, err = conn.Write([]byte(request.String())); err != nil {
 		conn.Close()

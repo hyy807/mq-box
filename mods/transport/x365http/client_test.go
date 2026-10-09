@@ -54,11 +54,22 @@ func runFakeServer(server net.Conn, wantPath string, responseBody []byte, done c
 		return
 	}
 	lower := strings.ToLower(head.String())
-	for _, header := range []string{"content-type: application/grpc", "transfer-encoding: chunked", "user-agent: mozilla/5.0", "host: dldir1.qq.com"} {
+	for _, header := range []string{
+		"content-type: application/grpc",
+		"transfer-encoding: chunked",
+		"user-agent: " + strings.ToLower(userAgent),
+		"host: dldir1.qq.com",
+	} {
 		if !strings.Contains(lower, header) {
 			fail("missing %q in:\n%s", header, head.String())
 			return
 		}
+	}
+	// 新版 x365 覆盖后的 UA 必须是 111 字节的完整 chrome UA（0x6f），
+	// 简写的 Mozilla/5.0 已被服务端中间层当成非浏览器流量。
+	if !strings.Contains(lower, "chrome/120.0.0.0") {
+		fail("user-agent is not the full chrome UA:\n%s", head.String())
+		return
 	}
 	sizeLine, err := reader.ReadString('\n')
 	if err != nil {
