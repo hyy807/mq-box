@@ -15,6 +15,7 @@ import (
 	"github.com/sagernet/sing-box/mods/protocol/oppa"
 	"github.com/sagernet/sing-box/mods/protocol/shadowquic"
 	"github.com/sagernet/sing-box/mods/protocol/vlessxhttp"
+	"github.com/sagernet/sing-box/mods/protocol/x365"
 )
 
 func init() {
@@ -31,4 +32,5 @@ func RegisterOutbounds(registry *outbound.Registry) {
 	mieru.RegisterOutbound(registry)
 	shadowquic.RegisterOutbound(registry)
 	vlessxhttp.RegisterOutbound(registry)
+	x365.RegisterOutbound(registry)
 }

@@ -43,3 +43,24 @@ type VLESSXHTTPOutboundOptions struct {
 	ModTLSOptionsContainer
 	XHTTP XHTTPOptions `json:"xhttp"`
 }
+
+// X365Options configures the x365 carrier: an HTTP/1.1 POST with
+// Transfer-Encoding: chunked over REALITY/TLS.
+type X365Options struct {
+	Host    string               `json:"host,omitempty"`
+	Path    string               `json:"path,omitempty"`
+	Headers badoption.HTTPHeader `json:"headers,omitempty"`
+}
+
+// X365OutboundOptions is the饿饭/365VPN private `x365` outbound: a VLESS-style
+// UUID handshake wrapped in the maker-defined X365 frame on an HTTP/1.1 chunked
+// carrier. Upstream `vless` / `xhttp` are untouched.
+type X365OutboundOptions struct {
+	option.DialerOptions
+	option.ServerOptions
+	UUID           string             `json:"uuid"`
+	Network        option.NetworkList `json:"network,omitempty"`
+	PacketEncoding *string            `json:"packet_encoding,omitempty"`
+	ModTLSOptionsContainer
+	X365 X365Options `json:"x365"`
+}

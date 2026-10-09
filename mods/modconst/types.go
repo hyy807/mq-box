@@ -13,6 +13,7 @@ const (
 	TypeMieru         = "mieru"
 	TypeShadowQUIC    = "shadowquic"
 	TypeVLESSXHTTP    = "vless-xhttp"
+	TypeX365          = "x365"
 )
 
 // DisplayName returns the UI name of a private protocol, or "" when the type
@@ -37,6 +38,8 @@ func DisplayName(outboundType string) string {
 		return "ShadowQUIC"
 	case TypeVLESSXHTTP:
 		return "VLESS XHTTP"
+	case TypeX365:
+		return "X365"
 	}
 	return ""
 }
