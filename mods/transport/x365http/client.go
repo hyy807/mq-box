@@ -1,37 +1,33 @@
-// Package x365http 实现 X365 协议的承载层：REALITY/TLS 之上的
-// HTTP/1.1 POST + Transfer-Encoding: chunked 流。
+// Package x365http 实现 X365 协议的承载层。
 //
-// 与官方新实现（mihomo 2026-10 build 718223992b53，adapter/outbound.prepareX365XHTTPHeaders
-// + (*Vless).streamConnContext 反汇编）逐项核对一致：
+// 隧道层完全照上游官方 mihomo transport/xhttp 的 stream-one 设计
+// （client.go: DialStreamOne / reuse.go: ReuseManager）：
 //
-//	POST <path> HTTP/1.1
-//	Host: <伪装域名>
-//	Content-Type: application/grpc
-//	Transfer-Encoding: chunked
-//	User-Agent: <覆盖为完整 Chrome UA>
+//   - 底层 net.Conn（REALITY/TLS）由本包提供，塞进标准库 http.Transport
+//     的 DialTLSContext；
+//   - 由 http.Transport 自带的 keep-alive 连接池负责 TCP 复用；
+//   - ReuseManager 管理多个 http.Transport 实例并按负载轮换；
+//   - 请求体用 io.Pipe 流式发送，第一个 Write 即 X365 握手帧；
+//   - 用 httptrace.GotConn 在 TCP 建好瞬间返回 conn，不等 HTTP 响应，
+//     避免 CDN 缓冲响应头导致的死锁（上游注释原话）。
 //
-// 之后每个 Write 立即做成一个 chunk 发出（上层 X365 握手帧即第一个 chunk），
-// 服务端响应体同样是 chunked：首块 'X365' + 1B 状态（0 = 成功），其后是裸载荷。
-//
-// 关键点（踩过的坑，来自参考实现实测）：
-//   - 服务端 ALPN 恒为 http/1.1，别用 h2：XHTTP 的 h2 通道在这个部署上不通。
-//   - 必须 Transfer-Encoding: chunked；用 Content-Length 会被当一次性请求。
-//   - 每次 Write 立即成块，不能缓冲，否则数据滞留、隧道建好但 0 字节。
-//   - User-Agent 必须覆盖为 chrome UA：新版 x365 分支会先 delete 再 set
-//     `User-Agent`（streamConnContext 内 addHeader 路径，值长 0x6f=111 字节），
-//     不是默认 Go UA。伪装度不够会被中间层识别。
-//   - 语义上等价于 xhttp 的 mode=stream-one：单一 POST 长期复用，
-//     不做 packet-up/stream-up 的多请求上行。
+// 与上游的唯一差异是「协议兼容」部分：请求头按 X365 的伪装要求构造
+// （POST + application/grpc + chunked + 完整 Chrome UA），响应体首块为
+// 'X365' + 1B 状态码。
 package x365http
 
 import (
-	std_bufio "bufio"
 	"context"
+	"errors"
+	"io"
 	"net"
 	"net/http"
-	"strconv"
+	"net/http/httptrace"
+	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/common/tls"
@@ -43,9 +39,19 @@ import (
 
 var _ adapter.V2RayClientTransport = (*Client)(nil)
 
-// userAgent 是 x365 分支强制覆盖的 User-Agent 值，取自新版实现的
-// 内联字符串常量（长度 0x6f = 111 字节，与 mihomo build 718223992b53 一致）。
+// userAgent 是 x365 分支强制覆盖的 User-Agent 值（长度 0x6f = 111 字节，
+// 与 mihomo build 718223992b53 内联常量一致）。缺失会被识别为非浏览器流量。
 const userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+
+// 连接池参数，取值对齐上游 xhttp 的默认量级。
+const (
+	defaultIdleConnTimeout = 90 * time.Second
+	defaultMaxConcurrency  = 8
+	defaultMaxConnections  = 4
+)
+
+// TransportMaker 新建一个底层 http.RoundTripper（含独立连接池）。
+type TransportMaker func() http.RoundTripper
 
 type Client struct {
 	dialer     N.Dialer
@@ -53,6 +59,7 @@ type Client struct {
 	path       string
 	host       string
 	headers    http.Header
+	reuse      *ReuseManager
 }
 
 func NewClient(dialer N.Dialer, serverAddr M.Socksaddr, options modoption.X365Options, tlsConfig tls.Config) (*Client, error) {
@@ -79,175 +86,330 @@ func NewClient(dialer N.Dialer, serverAddr M.Socksaddr, options modoption.X365Op
 	for key, value := range options.Headers {
 		headers[key] = value
 	}
-	return &Client{
+	client := &Client{
 		dialer:     dialer,
 		serverAddr: serverAddr,
 		path:       path,
 		host:       host,
 		headers:    headers,
-	}, nil
+	}
+	client.reuse = NewReuseManager(defaultMaxConnections, defaultMaxConcurrency, client.makeTransport)
+	return client, nil
+}
+
+// makeTransport 照上游 xhttp 的做法：把本协议的底层 net.Conn 直接
+// 作为 http.Transport 的 DialTLSContext，从而白拿标准库的 keep-alive 连接池。
+func (c *Client) makeTransport() http.RoundTripper {
+	return &http.Transport{
+		DialTLSContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return c.dialer.DialContext(ctx, N.NetworkTCP, c.serverAddr)
+		},
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return c.dialer.DialContext(ctx, N.NetworkTCP, c.serverAddr)
+		},
+		IdleConnTimeout:     defaultIdleConnTimeout,
+		ForceAttemptHTTP2:   false, // X365 只走 http/1.1
+		DisableCompression:  true,
+		MaxIdleConnsPerHost: defaultMaxConcurrency,
+	}
 }
 
 func (c *Client) DialContext(ctx context.Context) (net.Conn, error) {
-	conn, err := c.dialNew(ctx)
+	transport := c.reuse.GetTransport()
+	requestURL := url.URL{
+		Scheme: "https",
+		Host:   c.host,
+		Path:   c.path,
+	}
+	pr, pw := io.Pipe()
+	conn := &Conn{writer: pw}
+
+	// GotConn 在 TCP 建好的一瞬触发，于是可以在不等 HTTP 响应的情况下
+	// 返回 conn——这正是上游用来打破「CDN 缓冲响应头」死锁的手段。
+	gotConn := make(chan bool, 1)
+	streamCtx := httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
+		GotConn: func(info httptrace.GotConnInfo) {
+			select {
+			case gotConn <- true:
+			default: // GotConn 可能被多次调用，忽略后续
+			}
+		},
+	})
+
+	req, err := http.NewRequestWithContext(streamCtx, http.MethodPost, requestURL.String(), pr)
 	if err != nil {
+		_ = pr.Close()
+		_ = pw.Close()
+		_ = transport.Close()
+		return nil, E.Cause(err, "build x365 request")
+	}
+	req.Host = c.host
+	req.Header.Set("Content-Type", "application/grpc")
+	req.Header.Set("Transfer-Encoding", "chunked")
+	req.Header.Set("User-Agent", userAgent)
+	for key, values := range c.headers {
+		for _, value := range values {
+			req.Header.Set(key, value)
+		}
+	}
+	// 用 chunked，禁用标准库对长度的推断。
+	req.ContentLength = -1
+
+	wrc := newWaitReadCloser()
+
+	go func() {
+		resp, err := transport.RoundTrip(req)
+		if err != nil {
+			wrc.CloseWithError(err)
+			select {
+			case gotConn <- false:
+			default:
+			}
+			return
+		}
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			_ = resp.Body.Close()
+			wrc.CloseWithError(E.New("x365 stream-one bad status: ", resp.Status))
+			return
+		}
+		wrc.Set(&statusReader{status: resp.Body})
+	}()
+
+	if !<-gotConn {
+		_ = pr.Close()
+		_ = pw.Close()
+		_ = transport.Close()
+		var buf [1]byte
+		_, err = wrc.Read(buf[:])
+		if err == nil {
+			err = E.New("x365: round trip failed before connect")
+		}
 		return nil, err
+	}
+
+	conn.reader = wrc
+	conn.onClose = func() {
+		_ = pr.Close()
+		_ = transport.Close()
 	}
 	return conn, nil
 }
 
-func (c *Client) dialNew(ctx context.Context) (*Conn, error) {
-	conn, err := c.dialer.DialContext(ctx, N.NetworkTCP, c.serverAddr)
-	if err != nil {
-		return nil, err
-	}
-	var request strings.Builder
-	request.WriteString("POST ")
-	request.WriteString(c.path)
-	request.WriteString(" HTTP/1.1\r\n")
-	request.WriteString("Host: ")
-	request.WriteString(c.host)
-	request.WriteString("\r\n")
-	for key, values := range c.headers {
-		for _, value := range values {
-			request.WriteString(key)
-			request.WriteString(": ")
-			request.WriteString(value)
-			request.WriteString("\r\n")
-		}
-	}
-	request.WriteString("Content-Type: application/grpc\r\n")
-	request.WriteString("Transfer-Encoding: chunked\r\n")
-	// 新版 x365 分支强制覆盖 User-Agent 为完整 chrome UA（不是 Go 默认值，
-	// 也不是简写的 Mozilla/5.0）。缺失会被识别为非浏览器流量。
-	request.WriteString("User-Agent: ")
-	request.WriteString(userAgent)
-	request.WriteString("\r\n")
-	request.WriteString("\r\n")
-	if _, err = conn.Write([]byte(request.String())); err != nil {
-		conn.Close()
-		return nil, E.Cause(err, "write x365 request")
-	}
-	tunnel := &Conn{Conn: conn, reader: std_bufio.NewReaderSize(conn, 64*1024)}
-	// 请求头已发出，响应头可以立即在后台预读——Dial 不等它。
-	tunnel.startHeadPrefetch()
-	return tunnel, nil
-}
-
+// Close 释放本 Client 占用的所有连接池。
 func (c *Client) Close() error {
-	return nil
+	return c.reuse.Close()
 }
 
-// Conn 是 X365 隧道连接：写入自动 chunk 编码，读取自动 chunk 解码。
+// Conn 是 X365 隧道连接：写入即 chunk（由 io.Pipe 天然分帧），
+// 读取走响应体（首 5 字节是 X365 状态头）。
 type Conn struct {
-	net.Conn
-	reader    *std_bufio.Reader
-	headRead  bool
-	body      net.Conn
-	closeOnce bool
-	writeBuf  [1 << 16]byte
-
-	// 响应头异步预读：Dial 返回后立刻在后台读 HTTP 响应头 + X365 状态头，
-	// 让下次 Read 直接命中（上游 xhttp 的 WaitReadCloser 等价做法）。
-	headErr   error
-	headReady chan struct{}
-	headOnce  sync.Once
+	writer  io.WriteCloser
+	reader  io.ReadCloser
+	onClose func()
 }
 
-// startHeadPrefetch 在后台预读响应头，Dial 路径不再同步等 RTT。
-func (c *Conn) startHeadPrefetch() {
-	c.headReady = make(chan struct{})
-	go func() {
-		c.headErr = c.readHead()
-		c.headOnce.Do(func() { close(c.headReady) })
-	}()
-}
+func (c *Conn) Write(p []byte) (int, error) { return c.writer.Write(p) }
 
-func (c *Conn) readHead() error {
-	if c.headRead {
-		return nil
-	}
-	response, err := http.ReadResponse(c.reader, &http.Request{Method: http.MethodPost})
-	if err != nil {
-		return E.Cause(err, "read x365 response head")
-	}
-	if response.StatusCode != http.StatusOK {
-		var head strings.Builder
-		response.Header.Write(&head) //nolint:errcheck
-		detail := strings.Join(strings.Fields(head.String()), " ")
-		if len(detail) > 300 {
-			detail = detail[:300]
-		}
-		return E.New("x365: unexpected status: ", response.Status, " headers=", detail)
-	}
-	c.headRead = true
-	// http.Response.Body 已经内置 chunked 解码（含 trailer）。
-	c.body = &bodyConn{Conn: c.Conn, reader: response.Body}
-	return nil
-}
-
-func (c *Conn) Read(p []byte) (int, error) {
-	if !c.headRead {
-		if c.headReady != nil {
-			// 等后台预读完成，避免重复读同一段字节流。
-			<-c.headReady
-			if c.headErr != nil {
-				return 0, c.headErr
-			}
-		} else if err := c.readHead(); err != nil {
-			return 0, err
-		}
-	}
-	return c.body.Read(p)
-}
-
-// Write 立即把数据做成一个 HTTP/1.1 chunk（不缓冲，见包注释）。
-// 头部+载荷+CRLF 合并为一次 Write，避免每块 3 次 syscall 带来的小包延迟。
-func (c *Conn) Write(p []byte) (int, error) {
-	if len(p) == 0 {
-		return 0, nil
-	}
-	var buf []byte
-	// 大包直接分片写，避免额外一次拷贝。
-	if len(p) < 1<<16 {
-		buf = c.writeBuf[:0]
-		buf = append(buf, strconv.FormatInt(int64(len(p)), 16)...)
-		buf = append(buf, '\r', '\n')
-		buf = append(buf, p...)
-		buf = append(buf, '\r', '\n')
-		if _, err := c.Conn.Write(buf); err != nil {
-			return 0, err
-		}
-		return len(p), nil
-	}
-	if _, err := c.Conn.Write([]byte(strconv.FormatInt(int64(len(p)), 16) + "\r\n")); err != nil {
-		return 0, err
-	}
-	if _, err := c.Conn.Write(p); err != nil {
-		return 0, err
-	}
-	if _, err := c.Conn.Write([]byte("\r\n")); err != nil {
-		return 0, err
-	}
-	return len(p), nil
-}
+func (c *Conn) Read(p []byte) (int, error) { return c.reader.Read(p) }
 
 func (c *Conn) Close() error {
-	if !c.closeOnce {
-		c.closeOnce = true
-		// 结束 chunked 请求体：0\r\n\r\n
-		_, _ = c.Conn.Write([]byte("0\r\n\r\n"))
+	var errs []error
+	if c.writer != nil {
+		errs = append(errs, c.writer.Close())
 	}
-	return c.Conn.Close()
+	if c.reader != nil {
+		errs = append(errs, c.reader.Close())
+	}
+	if c.onClose != nil {
+		c.onClose()
+	}
+	return errors.Join(errs...)
 }
 
-// bodyConn 只借用底层 Conn 的生命周期，读写走响应体。
-type bodyConn struct {
-	net.Conn
-	reader interface {
-		Read([]byte) (int, error)
-		Close() error
+// 隧道是长连接，deadline 由上层负责；这里不额外实现。
+func (c *Conn) LocalAddr() net.Addr  { return dummyAddr{} }
+func (c *Conn) RemoteAddr() net.Addr { return dummyAddr{} }
+func (c *Conn) SetDeadline(t time.Time) error {
+	return nil
+}
+func (c *Conn) SetReadDeadline(t time.Time) error  { return nil }
+func (c *Conn) SetWriteDeadline(t time.Time) error { return nil }
+
+type dummyAddr struct{}
+
+func (dummyAddr) Network() string { return "x365" }
+func (dummyAddr) String() string  { return "x365" }
+
+// statusReader 校验响应体首 5 字节的 X365 状态头，其后透传。
+type statusReader struct {
+	status io.ReadCloser
+	once   sync.Once
+	err    error
+	head   []byte
+}
+
+func (s *statusReader) Read(p []byte) (int, error) {
+	s.once.Do(func() {
+		var head [5]byte
+		if _, err := io.ReadFull(s.status, head[:]); err != nil {
+			s.err = E.Cause(err, "read x365 response status")
+			return
+		}
+		if string(head[0:4]) != "X365" {
+			s.err = E.New("x365: bad response magic: ", string(head[0:4]))
+			return
+		}
+		if head[4] != 0 {
+			s.err = E.New("x365: server rejected, status=", head[4])
+		}
+	})
+	if s.err != nil {
+		return 0, s.err
+	}
+	return s.status.Read(p)
+}
+
+func (s *statusReader) Close() error { return s.status.Close() }
+
+// waitReadCloser 是上游 WaitReadCloser 的等价实现：Read 阻塞到 Set 被调用，
+// 从而让 RoundTrip 可以在后台 goroutine 里进行。
+type waitReadCloser struct {
+	ready  chan struct{}
+	source io.ReadCloser
+	err    error
+	once   sync.Once
+}
+
+func newWaitReadCloser() *waitReadCloser {
+	return &waitReadCloser{ready: make(chan struct{})}
+}
+
+func (w *waitReadCloser) Set(rc io.ReadCloser) {
+	w.source = rc
+	w.once.Do(func() { close(w.ready) })
+}
+
+func (w *waitReadCloser) CloseWithError(err error) {
+	w.err = err
+	w.once.Do(func() { close(w.ready) })
+}
+
+func (w *waitReadCloser) Read(p []byte) (int, error) {
+	<-w.ready
+	if w.err != nil {
+		return 0, w.err
+	}
+	if w.source == nil {
+		return 0, io.EOF
+	}
+	return w.source.Read(p)
+}
+
+func (w *waitReadCloser) Close() error {
+	w.once.Do(func() { close(w.ready) })
+	if w.source != nil {
+		return w.source.Close()
+	}
+	return nil
+}
+
+// ReuseManager 管理多个 http.RoundTripper 实例（各自带连接池），
+// 按 openUsage 最低者挑选，语义对齐上游 xhttp 的 ReuseManager。
+type ReuseManager struct {
+	maxConnections int
+	maxConcurrency int
+	maker          TransportMaker
+	mu             sync.Mutex
+	entries        []*reuseEntry
+}
+
+type reuseEntry struct {
+	transport   http.RoundTripper
+	openUsage   atomic.Int32
+	leftRequest atomic.Int32
+	closed      atomic.Bool
+}
+
+func NewReuseManager(maxConnections, maxConcurrency int, maker TransportMaker) *ReuseManager {
+	return &ReuseManager{
+		maxConnections: maxConnections,
+		maxConcurrency: maxConcurrency,
+		maker:          maker,
 	}
 }
 
-func (b *bodyConn) Read(p []byte) (int, error) { return b.reader.Read(p) }
+func (m *ReuseManager) Close() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, entry := range m.entries {
+		entry.close()
+	}
+	m.entries = nil
+	return nil
+}
+
+func (entry *reuseEntry) close() {
+	if !entry.closed.CompareAndSwap(false, true) {
+		return
+	}
+	if closer, ok := entry.transport.(interface{ CloseIdleConnections() }); ok {
+		closer.CloseIdleConnections()
+	}
+}
+
+func (entry *reuseEntry) release() {
+	remaining := entry.openUsage.Add(-1)
+	if remaining <= 0 {
+		entry.openUsage.Store(0)
+	}
+}
+
+func (m *ReuseManager) GetTransport() *reuseTransport {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// 清理已关闭的条目
+	kept := m.entries[:0]
+	for _, entry := range m.entries {
+		if entry.closed.Load() {
+			continue
+		}
+		kept = append(kept, entry)
+	}
+	m.entries = kept
+
+	var entry *reuseEntry
+	if len(m.entries) >= m.maxConnections {
+		var best *reuseEntry
+		for _, candidate := range m.entries {
+			if m.maxConcurrency > 0 && int(candidate.openUsage.Load()) >= m.maxConcurrency {
+				continue
+			}
+			if best == nil || candidate.openUsage.Load() < best.openUsage.Load() {
+				best = candidate
+			}
+		}
+		entry = best
+	}
+	if entry == nil {
+		entry = &reuseEntry{transport: m.maker()}
+		entry.leftRequest.Store(1<<30 - 1)
+		m.entries = append(m.entries, entry)
+	}
+	entry.openUsage.Add(1)
+	return &reuseTransport{entry: entry}
+}
+
+type reuseTransport struct {
+	entry *reuseEntry
+	once  sync.Once
+}
+
+func (rt *reuseTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	return rt.entry.transport.RoundTrip(req)
+}
+
+func (rt *reuseTransport) Close() error {
+	rt.once.Do(func() { rt.entry.release() })
+	return nil
+}

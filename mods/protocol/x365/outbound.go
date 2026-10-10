@@ -137,13 +137,10 @@ func (h *Outbound) DialContext(ctx context.Context, network string, destination 
 			return nil, err
 		}
 		if err = h.writeHandshake(conn, commandTCP, destination); err != nil {
-			conn.Close()
+			_ = conn.Close()
 			return nil, err
 		}
-		// 参照上游 xhttp 的 DialStreamOne：不在 Dial 里同步等响应头，
-		// 否则每次建连都多付一个 RTT（服务端要等够数据才发头）。
-		// 改为首次 Read 时才验证 X365 状态头。
-		return &lazyStatusConn{Conn: conn}, nil
+		return conn, nil
 	case N.NetworkUDP:
 		h.logger.InfoContext(ctx, "outbound packet connection to ", destination)
 		conn, err := h.transport.DialContext(ctx)
@@ -151,38 +148,13 @@ func (h *Outbound) DialContext(ctx context.Context, network string, destination 
 			return nil, err
 		}
 		if err = h.writeHandshake(conn, commandUDP, destination); err != nil {
-			conn.Close()
+			_ = conn.Close()
 			return nil, err
 		}
-		return &packetConn{Conn: &lazyStatusConn{Conn: conn}, destination: destination}, nil
+		return &packetConn{Conn: conn, destination: destination}, nil
 	default:
 		return nil, E.Extend(N.ErrUnknownNetwork, network)
 	}
-}
-
-// lazyStatusConn 把 X365 的 5 字节响应头校验从 Dial 推迟到首次读，
-// 这样建连路径不再同步等待服务端响应（上游 xhttp DialStreamOne 的等价做法）。
-type lazyStatusConn struct {
-	net.Conn
-	checked bool
-}
-
-func (c *lazyStatusConn) checkStatus() error {
-	if c.checked {
-		return nil
-	}
-	if err := readResponseHeader(c.Conn); err != nil {
-		return err
-	}
-	c.checked = true
-	return nil
-}
-
-func (c *lazyStatusConn) Read(p []byte) (int, error) {
-	if err := c.checkStatus(); err != nil {
-		return 0, err
-	}
-	return c.Conn.Read(p)
 }
 
 func (h *Outbound) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
@@ -195,14 +167,14 @@ func (h *Outbound) ListenPacket(ctx context.Context, destination M.Socksaddr) (n
 		return nil, err
 	}
 	if err = h.writeHandshake(conn, commandZero, destination); err != nil {
-		conn.Close()
+		_ = conn.Close()
 		return nil, err
 	}
-	return &packetConn{Conn: &lazyStatusConn{Conn: conn}, destination: destination}, nil
+	return &packetConn{Conn: conn, destination: destination}, nil
 }
 
-// writeHandshake emits the X365 frame as the first chunk of the chunked body.
-func (h *Outbound) writeHandshake(conn net.Conn, command byte, destination M.Socksaddr) error {
+// writeHandshake 把 X365 握手帧作为 chunked 请求体的首个 chunk 发出。
+func (h *Outbound) writeHandshake(conn io.Writer, command byte, destination M.Socksaddr) error {
 	frame := make([]byte, 0, 64)
 	frame = append(frame, frameMagic...)
 	frame = append(frame, frameVersion, command)
@@ -243,35 +215,13 @@ func serializeAddrPort(destination M.Socksaddr) []byte {
 	return out
 }
 
-// readResponseHeader consumes the server's "X365" + status byte prefix.
-// A non-zero status byte means the account/session is rejected and the
-// connection must be dropped.
-func readResponseHeader(conn net.Conn) error {
-	var header [5]byte
-	if _, err := io.ReadFull(conn, header[:]); err != nil {
-		return E.Cause(err, "read x365 response header")
-	}
-	if string(header[:4]) != frameMagic {
-		return E.New("invalid x365 response header: got ", hexPrefix(header[:4]))
-	}
-	if header[4] != statusOK {
-		return E.New("x365: server rejected session, status=", header[4])
-	}
-	return nil
+// packetConn 用 2 字节大端长度前缀搬运整包，对齐参考实现的 UDP 分帧。
+type packetConn struct {
+	net.Conn
+	destination M.Socksaddr
 }
 
-func hexPrefix(b []byte) string {
-	var sb strings.Builder
-	for _, c := range b {
-		const hexDigits = "0123456789abcdef"
-		sb.WriteByte(hexDigits[c>>4])
-		sb.WriteByte(hexDigits[c&0x0f])
-	}
-	return sb.String()
-}
-
-// parseUUIDKey turns a UUID string into the raw 16 bytes used as the X365
-// frame key field (NOT hashed).
+// parseUUIDKey 把 UUID 字符串转成 X365 帧 key 字段用的原始 16 字节（不做哈希）。
 func parseUUIDKey(value string) ([16]byte, error) {
 	var key [16]byte
 	cleaned := strings.ReplaceAll(strings.TrimSpace(value), "-", "")
@@ -284,13 +234,6 @@ func parseUUIDKey(value string) ([16]byte, error) {
 	}
 	copy(key[:], decoded)
 	return key, nil
-}
-
-// packetConn moves whole datagrams with a 2-byte big-endian length prefix,
-// mirroring the reference implementation's UDP framing.
-type packetConn struct {
-	net.Conn
-	destination M.Socksaddr
 }
 
 func (c *packetConn) Read(p []byte) (int, error) {
