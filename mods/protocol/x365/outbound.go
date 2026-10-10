@@ -144,7 +144,7 @@ func (h *Outbound) DialContext(ctx context.Context, network string, destination 
 			conn.Close()
 			return nil, err
 		}
-		return conn, nil
+		return h.transport.WrapStream(conn), nil
 	case N.NetworkUDP:
 		h.logger.InfoContext(ctx, "outbound packet connection to ", destination)
 		conn, err := h.transport.DialContext(ctx)

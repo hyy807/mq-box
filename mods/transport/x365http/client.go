@@ -88,6 +88,14 @@ func NewClient(dialer N.Dialer, serverAddr M.Socksaddr, options modoption.X365Op
 }
 
 func (c *Client) DialContext(ctx context.Context) (net.Conn, error) {
+	conn, err := c.dialNew(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return conn, nil
+}
+
+func (c *Client) dialNew(ctx context.Context) (*Conn, error) {
 	conn, err := c.dialer.DialContext(ctx, N.NetworkTCP, c.serverAddr)
 	if err != nil {
 		return nil, err
@@ -126,6 +134,12 @@ func (c *Client) Close() error {
 	return nil
 }
 
+// WrapStream 直接返回隧道；此实现不跨 stream 复用隧道（HTTP/1.1 单 POST
+// 独占，复用会串流），保留接口以便上层统一处理。
+func (c *Client) WrapStream(conn net.Conn) net.Conn {
+	return conn
+}
+
 // Conn 是 X365 隧道连接：写入自动 chunk 编码，读取自动 chunk 解码。
 type Conn struct {
 	net.Conn
@@ -133,6 +147,7 @@ type Conn struct {
 	headRead  bool
 	body      net.Conn
 	closeOnce bool
+	writeBuf  [1 << 16]byte
 }
 
 func (c *Conn) readHead() error {
@@ -166,9 +181,23 @@ func (c *Conn) Read(p []byte) (int, error) {
 }
 
 // Write 立即把数据做成一个 HTTP/1.1 chunk（不缓冲，见包注释）。
+// 头部+载荷+CRLF 合并为一次 Write，避免每块 3 次 syscall 带来的小包延迟。
 func (c *Conn) Write(p []byte) (int, error) {
 	if len(p) == 0 {
 		return 0, nil
+	}
+	var buf []byte
+	// 大包直接分片写，避免额外一次拷贝。
+	if len(p) < 1<<16 {
+		buf = c.writeBuf[:0]
+		buf = append(buf, strconv.FormatInt(int64(len(p)), 16)...)
+		buf = append(buf, '\r', '\n')
+		buf = append(buf, p...)
+		buf = append(buf, '\r', '\n')
+		if _, err := c.Conn.Write(buf); err != nil {
+			return 0, err
+		}
+		return len(p), nil
 	}
 	if _, err := c.Conn.Write([]byte(strconv.FormatInt(int64(len(p)), 16) + "\r\n")); err != nil {
 		return 0, err
