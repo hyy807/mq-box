@@ -140,11 +140,10 @@ func (h *Outbound) DialContext(ctx context.Context, network string, destination 
 			conn.Close()
 			return nil, err
 		}
-		if err = readResponseHeader(conn); err != nil {
-			conn.Close()
-			return nil, err
-		}
-		return h.transport.WrapStream(conn), nil
+		// 参照上游 xhttp 的 DialStreamOne：不在 Dial 里同步等响应头，
+		// 否则每次建连都多付一个 RTT（服务端要等够数据才发头）。
+		// 改为首次 Read 时才验证 X365 状态头。
+		return &lazyStatusConn{Conn: conn}, nil
 	case N.NetworkUDP:
 		h.logger.InfoContext(ctx, "outbound packet connection to ", destination)
 		conn, err := h.transport.DialContext(ctx)
@@ -155,14 +154,35 @@ func (h *Outbound) DialContext(ctx context.Context, network string, destination 
 			conn.Close()
 			return nil, err
 		}
-		if err = readResponseHeader(conn); err != nil {
-			conn.Close()
-			return nil, err
-		}
-		return &packetConn{Conn: conn, destination: destination}, nil
+		return &packetConn{Conn: &lazyStatusConn{Conn: conn}, destination: destination}, nil
 	default:
 		return nil, E.Extend(N.ErrUnknownNetwork, network)
 	}
+}
+
+// lazyStatusConn 把 X365 的 5 字节响应头校验从 Dial 推迟到首次读，
+// 这样建连路径不再同步等待服务端响应（上游 xhttp DialStreamOne 的等价做法）。
+type lazyStatusConn struct {
+	net.Conn
+	checked bool
+}
+
+func (c *lazyStatusConn) checkStatus() error {
+	if c.checked {
+		return nil
+	}
+	if err := readResponseHeader(c.Conn); err != nil {
+		return err
+	}
+	c.checked = true
+	return nil
+}
+
+func (c *lazyStatusConn) Read(p []byte) (int, error) {
+	if err := c.checkStatus(); err != nil {
+		return 0, err
+	}
+	return c.Conn.Read(p)
 }
 
 func (h *Outbound) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
@@ -178,11 +198,7 @@ func (h *Outbound) ListenPacket(ctx context.Context, destination M.Socksaddr) (n
 		conn.Close()
 		return nil, err
 	}
-	if err = readResponseHeader(conn); err != nil {
-		conn.Close()
-		return nil, err
-	}
-	return &packetConn{Conn: conn, destination: destination}, nil
+	return &packetConn{Conn: &lazyStatusConn{Conn: conn}, destination: destination}, nil
 }
 
 // writeHandshake emits the X365 frame as the first chunk of the chunked body.

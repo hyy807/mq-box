@@ -31,6 +31,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/common/tls"
@@ -127,17 +128,14 @@ func (c *Client) dialNew(ctx context.Context) (*Conn, error) {
 		conn.Close()
 		return nil, E.Cause(err, "write x365 request")
 	}
-	return &Conn{Conn: conn, reader: std_bufio.NewReaderSize(conn, 64*1024)}, nil
+	tunnel := &Conn{Conn: conn, reader: std_bufio.NewReaderSize(conn, 64*1024)}
+	// 请求头已发出，响应头可以立即在后台预读——Dial 不等它。
+	tunnel.startHeadPrefetch()
+	return tunnel, nil
 }
 
 func (c *Client) Close() error {
 	return nil
-}
-
-// WrapStream 直接返回隧道；此实现不跨 stream 复用隧道（HTTP/1.1 单 POST
-// 独占，复用会串流），保留接口以便上层统一处理。
-func (c *Client) WrapStream(conn net.Conn) net.Conn {
-	return conn
 }
 
 // Conn 是 X365 隧道连接：写入自动 chunk 编码，读取自动 chunk 解码。
@@ -148,6 +146,21 @@ type Conn struct {
 	body      net.Conn
 	closeOnce bool
 	writeBuf  [1 << 16]byte
+
+	// 响应头异步预读：Dial 返回后立刻在后台读 HTTP 响应头 + X365 状态头，
+	// 让下次 Read 直接命中（上游 xhttp 的 WaitReadCloser 等价做法）。
+	headErr   error
+	headReady chan struct{}
+	headOnce  sync.Once
+}
+
+// startHeadPrefetch 在后台预读响应头，Dial 路径不再同步等 RTT。
+func (c *Conn) startHeadPrefetch() {
+	c.headReady = make(chan struct{})
+	go func() {
+		c.headErr = c.readHead()
+		c.headOnce.Do(func() { close(c.headReady) })
+	}()
 }
 
 func (c *Conn) readHead() error {
@@ -174,8 +187,16 @@ func (c *Conn) readHead() error {
 }
 
 func (c *Conn) Read(p []byte) (int, error) {
-	if err := c.readHead(); err != nil {
-		return 0, err
+	if !c.headRead {
+		if c.headReady != nil {
+			// 等后台预读完成，避免重复读同一段字节流。
+			<-c.headReady
+			if c.headErr != nil {
+				return 0, c.headErr
+			}
+		} else if err := c.readHead(); err != nil {
+			return 0, err
+		}
 	}
 	return c.body.Read(p)
 }

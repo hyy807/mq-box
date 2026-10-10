@@ -147,3 +147,52 @@ func TestX365TransportWireFormat(t *testing.T) {
 		t.Fatal("server did not finish")
 	}
 }
+
+// TestDialReturnsBeforeServerResponds 验证 Dial 不再同步等响应头：
+// 服务端故意延迟发响应，Dial 必须立刻返回（上游 DialStreamOne 的行为）。
+func TestDialReturnsBeforeServerResponds(t *testing.T) {
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
+
+	release := make(chan struct{})
+	go func() {
+		reader := std_bufio.NewReader(server)
+		for { // 读完请求头
+			line, err := reader.ReadString('\n')
+			if err != nil {
+				return
+			}
+			if strings.TrimRight(line, "\r\n") == "" {
+				break
+			}
+		}
+		<-release // 卡住，直到测试确认 Dial 已返回
+		response := "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n" +
+			"7\r\nX365\x00ok\r\n"
+		_, _ = server.Write([]byte(response))
+	}()
+
+	var tlsConfig tls.Config
+	transport, err := NewClient(&fakeDialer{conn: client}, M.ParseSocksaddr("bgp01.example.com:443"),
+		modoption.X365Options{Host: "dldir1.qq.com", Path: "/hk1"}, tlsConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	dialDone := make(chan error, 1)
+	go func() {
+		_, err := transport.DialContext(context.Background())
+		dialDone <- err
+	}()
+
+	select {
+	case err := <-dialDone:
+		if err != nil {
+			t.Fatalf("dial: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Dial blocked waiting for the server response (should return after TCP connect)")
+	}
+	close(release)
+}
