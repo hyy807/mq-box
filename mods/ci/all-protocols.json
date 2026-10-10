@@ -118,7 +118,7 @@
       "password": "p"
     },
     {
-      "type": "x365",
+      "type": "vless-x365",
       "tag": "x365",
       "server": "155.254.126.202",
       "server_port": 443,
@@ -127,6 +127,7 @@
         "enabled": true,
         "server_name": "dldir1.qq.com",
         "alpn": [
+          "h2",
           "http/1.1"
         ],
         "utls": {
@@ -139,7 +140,7 @@
           "short_id": "c7cb949d076c9e93"
         }
       },
-      "x365": {
+      "xhttp": {
         "path": "/ae69",
         "host": "dldir1.qq.com"
       }
