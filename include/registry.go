@@ -106,6 +106,7 @@ func OutboundRegistry() *outbound.Registry {
 	registerQUICOutbounds(registry)
 	registerTailcatOutbound(registry)
 	registerStubForRemovedOutbounds(registry)
+	registerModOutbounds(registry) // mq-box
 
 	return registry
 }
